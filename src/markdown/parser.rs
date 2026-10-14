@@ -568,11 +568,11 @@ where
 }
 // ─── Highlight post-processing ────────────────────────────────────────────────
 
-/// Push a `Text` event's `Inline`s onto `out`, detecting `==highlight==` spans — pulldown-cmark
-/// has no native support for them, so each `Text` event is post-processed here.
+/// Push a text run's `Inline`s onto `out`, detecting `==highlight==` spans — pulldown-cmark
+/// has no native support for them, so each [`TextRun`] is post-processed here.
 ///
-/// Runs once per `Text` event of every reparse, so the common case — no `=` at all — is one
-/// `memchr` and a move of the event's own buffer, with no searcher set up and nothing copied.
+/// Runs once per text run of every reparse, so the common case — no `=` at all — is one
+/// `memchr` and a move of the run's own buffer, with no searcher set up and nothing copied.
 fn push_text_with_highlights(text: CowStr<'_>, out: &mut Vec<Inline>) {
     if memchr::memchr(b'=', text.as_bytes()).is_none() {
         if !text.is_empty() {
@@ -602,6 +602,99 @@ fn push_text_with_highlights(text: CowStr<'_>, out: &mut Vec<Inline>) {
     }
 }
 
+/// Consecutive `Text` events joined across smart punctuation, so the `==highlight==` scan sees
+/// the text as written: pulldown-cmark ends a text event at every quote, apostrophe, dash and
+/// ellipsis it substitutes (`it's` arrives as `it`, `’`, `s`), and scanning the pieces apart
+/// missed a highlight with one inside it (`==it's==`).
+///
+/// A piece joins only where a substituted glyph sits at the seam and the two are contiguous in
+/// the source.  Every other split stays one: an escape or entity (a gap in the ranges, or a raw
+/// form unlike its text) must not help form a `==` marker, and a run takes at most one plain
+/// piece past a glyph, so it never reaches past a split bracket into a footnote label (`^1`)
+/// and so never across a reference the other side sees as one event.  The parser and
+/// [`InlineColMap`](crate::markdown::InlineColMap) both cut runs through [`feed`](Self::feed),
+/// so the highlights one renders are the ones the other maps.
+pub(crate) struct TextRun<'a> {
+    /// The run's first piece, until a second joins it and `joined` takes over.
+    first: CowStr<'a>,
+    /// The joined pieces, grown in place so a long run's joins stay amortized.
+    joined: Option<String>,
+    pub range: Range<usize>,
+    /// Whether the run's last piece is a substituted glyph, or it ended on plain text.
+    glyph_last: bool,
+    /// Whether the run can take another piece: its pieces are verbatim source or glyphs.
+    open: bool,
+}
+
+impl<'a> TextRun<'a> {
+    /// Feed the next `Text` piece, `text` read from `raw` at `range`, to the run in `slot`.  It
+    /// joins that run if it can; otherwise it starts a new one and the finished run is returned
+    /// for the caller to flush.  Any other event ends the run: the caller `take`s the slot.
+    pub fn feed(
+        slot: &mut Option<Self>,
+        text: CowStr<'a>,
+        range: Range<usize>,
+        raw: &str,
+    ) -> Option<Self> {
+        if let Some(run) = slot {
+            if run.extend(&text, range.clone(), raw) {
+                return None;
+            }
+        }
+        slot.replace(Self::new(text, range, raw))
+    }
+
+    /// The run's text.
+    pub fn text(&self) -> &str {
+        self.joined.as_deref().unwrap_or(&self.first)
+    }
+
+    /// The run's text, owned.
+    pub fn into_text(self) -> CowStr<'a> {
+        self.joined.map_or(self.first, CowStr::from)
+    }
+
+    fn new(text: CowStr<'a>, range: Range<usize>, raw: &str) -> Self {
+        let glyph_last = is_smart_punct(&text, raw);
+        let open = glyph_last || raw == &*text;
+        Self {
+            first: text,
+            joined: None,
+            range,
+            glyph_last,
+            open,
+        }
+    }
+
+    /// Append the next piece if it joins the run; `false` leaves the run unchanged.
+    fn extend(&mut self, text: &str, range: Range<usize>, raw: &str) -> bool {
+        let glyph = is_smart_punct(text, raw);
+        let joins = self.open
+            && (glyph || raw == text)
+            && (glyph || self.glyph_last)
+            && self.range.end == range.start;
+        if joins {
+            self.joined
+                .get_or_insert_with(|| self.first.to_string())
+                .push_str(text);
+            self.range.end = range.end;
+            self.glyph_last = glyph;
+        }
+        joins
+    }
+}
+
+/// Whether `text` is the glyph `ENABLE_SMART_PUNCTUATION` substitutes for `raw`.  A run of four
+/// or more hyphens arrives as one piece of several dashes (`----` → `––`, `-----` → `—–`).
+fn is_smart_punct(text: &str, raw: &str) -> bool {
+    matches!(
+        (text, raw),
+        ("‘" | "’", "'") | ("“" | "”", "\"") | ("…", "...")
+    ) || (raw.len() >= 2
+        && raw.bytes().all(|b| b == b'-')
+        && text.chars().all(|c| matches!(c, '–' | '—')))
+}
+
 // ─── Inline parsing ───────────────────────────────────────────────────────────
 
 fn parse_inlines<'a, I>(events: &mut EventStream<'a, I>) -> Vec<Inline>
@@ -609,6 +702,8 @@ where
     I: Iterator<Item = (Event<'a>, Range<usize>)>,
 {
     let mut inlines = Vec::new();
+    // The text run being gathered for the `==highlight==` scan; see [`TextRun`].
+    let mut text: Option<TextRun<'a>> = None;
 
     loop {
         match events.peek() {
@@ -625,8 +720,19 @@ where
             None => break,
         };
 
+        if !matches!(event, Event::Text(_)) {
+            if let Some(run) = text.take() {
+                push_text_with_highlights(run.into_text(), &mut inlines);
+            }
+        }
+
         match event {
-            Event::Text(text) => push_text_with_highlights(text, &mut inlines),
+            Event::Text(piece) => {
+                let (range, raw) = (events.last_range(), events.last_text());
+                if let Some(run) = TextRun::feed(&mut text, piece, range, raw) {
+                    push_text_with_highlights(run.into_text(), &mut inlines);
+                }
+            }
             Event::Code(code) => inlines.push(Inline::Code(code.into_string())),
             Event::SoftBreak => inlines.push(Inline::SoftBreak),
             Event::HardBreak => inlines.push(Inline::HardBreak),
@@ -720,6 +826,9 @@ where
         }
     }
 
+    if let Some(run) = text {
+        push_text_with_highlights(run.into_text(), &mut inlines);
+    }
     inlines
 }
 
@@ -774,6 +883,87 @@ mod tests {
 
     fn src_lines(first: u32, content_col: &[Option<u32>]) -> SrcLines {
         SrcLines::new(first, content_col)
+    }
+
+    fn paragraph_inlines(src: &str) -> Vec<Inline> {
+        match parse(src).into_iter().next() {
+            Some(Block::Paragraph { inlines, .. }) => inlines,
+            other => panic!("expected a paragraph, got {other:?}"),
+        }
+    }
+
+    /// Smart punctuation splits pulldown-cmark's text events, but not a highlight: the pieces
+    /// join across each substituted glyph before the `==` scan.
+    #[test]
+    fn highlight_spans_smart_punctuation() {
+        let highlight = |s: &str| Inline::Highlight(vec![Inline::Text(s.into())]);
+        assert_eq!(
+            paragraph_inlines("==it's== x"),
+            [highlight("it’s"), Inline::Text(" x".into())]
+        );
+        assert_eq!(
+            paragraph_inlines("a ==\"q\" -- wait...== b"),
+            [
+                Inline::Text("a ".into()),
+                highlight("“q” – wait…"),
+                Inline::Text(" b".into()),
+            ]
+        );
+        // Four or more hyphens arrive as one piece of several dashes.
+        assert_eq!(
+            paragraph_inlines("==a ---- b== ==c ----- d=="),
+            [
+                highlight("a –– b"),
+                Inline::Text(" ".into()),
+                highlight("c —– d"),
+            ]
+        );
+        // Plain prose with smart punctuation is one text node, not one per piece.
+        assert_eq!(
+            paragraph_inlines("it's \"so\" -- ok"),
+            [Inline::Text("it’s “so” – ok".into())]
+        );
+    }
+
+    /// Only a glyph joins pieces: an escaped `=` (a gap in the ranges) and pulldown's split
+    /// brackets still end a run, as an entity (even between glyphs) and an inline tag do.
+    #[test]
+    fn text_runs_join_only_across_smart_punctuation() {
+        assert_eq!(
+            paragraph_inlines("==it's *x*=="),
+            [
+                Inline::Text("==it’s ".into()),
+                Inline::Italic(vec![Inline::Text("x".into())]),
+                Inline::Text("==".into()),
+            ]
+        );
+        assert_eq!(
+            paragraph_inlines("==x [y] z=="),
+            [
+                Inline::Text("==x ".into()),
+                Inline::Text("[".into()),
+                Inline::Text("y".into()),
+                Inline::Text("]".into()),
+                Inline::Text(" z==".into()),
+            ]
+        );
+        assert_eq!(
+            paragraph_inlines("==a&#61;= b=="),
+            [
+                Inline::Text("==a".into()),
+                Inline::Text("=".into()),
+                Inline::Text("= b==".into()),
+            ]
+        );
+        // An entity between two glyphs ends the run, though both its seams are glyphs.
+        assert_eq!(
+            paragraph_inlines("==a'&amp;'b=="),
+            [
+                Inline::Text("==a’".into()),
+                Inline::Text("&".into()),
+                Inline::Text("’b==".into()),
+            ]
+        );
     }
 
     /// The merged parse must produce exactly what the two-pass pairing produced.

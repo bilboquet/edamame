@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use pulldown_cmark::{BrokenLink, CowStr, Event, Options, Parser, Tag, TagEnd};
 
+use super::parser::TextRun;
 use super::renderer::util::link_fallback;
 use super::segment_break;
 
@@ -121,7 +122,15 @@ impl InlineColMap {
         let parser = Parser::new_with_broken_link_callback(raw_line, opts, Some(resolve));
         // The open link: where the walk stood at its start, its destination and its range.
         let mut link = None;
+        // Text pieces joined as the parser joins them, so `==` pairs the same way: see
+        // [`TextRun`].  Every other event ends the run.
+        let mut text: Option<TextRun<'_>> = None;
         for (event, range) in parser.into_offset_iter() {
+            if !matches!(event, Event::Text(_)) {
+                if let Some(run) = text.take() {
+                    walk.push_text(raw_line, run.range.clone(), run.text());
+                }
+            }
             match event {
                 Event::Start(Tag::Link { dest_url, .. }) => {
                     link = Some((walk.mark(), dest_url, range));
@@ -131,7 +140,12 @@ impl InlineColMap {
                         walk.end_link(raw_line, mark, &url, range);
                     }
                 }
-                Event::Text(text) => walk.push_text(raw_line, range, &text),
+                Event::Text(piece) => {
+                    let raw = raw_line.get(range.clone()).unwrap_or("");
+                    if let Some(run) = TextRun::feed(&mut text, piece, range, raw) {
+                        walk.push_text(raw_line, run.range.clone(), run.text());
+                    }
+                }
                 Event::Code(s) => walk.push_code(raw_line, &s, range),
                 // Math renders as its delimited source.  Parsed as math, not text, so it splits
                 // the text around it as the parser does: `y== $a$ ==x` holds no highlight.
@@ -151,6 +165,9 @@ impl InlineColMap {
                 // narrows the defined ones' entries to the renderer's `[label]` marker width.
                 _ => {}
             }
+        }
+        if let Some(run) = text {
+            walk.push_text(raw_line, run.range.clone(), run.text());
         }
 
         let mut entries = walk.map;
@@ -842,6 +859,37 @@ mod tests {
                 "round-trip failed at rendered col {rendered_col}"
             );
         }
+    }
+
+    /// A highlight whose text holds smart punctuation: its markers are skipped as the parser
+    /// pairs them, across the glyph that splits pulldown-cmark's text.
+    #[test]
+    fn highlight_across_smart_punctuation() {
+        // Renders "it’s x": six chars, the `’` one char for its one-byte `'`.
+        let map = InlineColMap::build("==it's== x");
+        assert_eq!(map.rendered_len(), 6);
+        assert_eq!(map.rendered_to_raw(0), 2, "the `i` past the opening marker");
+        assert_eq!(map.rendered_to_raw(2), 4, "the `’` on its `'`");
+        assert_eq!(
+            map.rendered_to_raw(4),
+            8,
+            "the space past the closing marker"
+        );
+    }
+
+    /// A dash run of four or more hyphens is one piece of several glyphs, each on its hyphens.
+    #[test]
+    fn highlight_across_dash_run() {
+        // Renders "a –– b".
+        let map = InlineColMap::build("==a ---- b==");
+        assert_eq!(map.rendered_len(), 6);
+        assert_eq!(map.rendered_to_raw(2), 4, "the first `–` on its `--`");
+        assert_eq!(map.rendered_to_raw(3), 6, "the second `–` on its `--`");
+        assert_eq!(
+            map.rendered_to_raw(5),
+            9,
+            "the `b` before the closing marker"
+        );
     }
 
     #[test]
