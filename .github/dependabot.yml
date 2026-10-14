@@ -1,5 +1,11 @@
 version: 2
 
+# Both ecosystems target `develop`, not `main`: `main` is the release branch
+# and only receives merges from `develop`, so a bump landing on `main` would
+# have to be back-merged.  Two caveats: this file is read only from the
+# default branch (`main`), so a change here takes effect once it is merged
+# there; and `target-branch` governs version updates only — Dependabot
+# security updates always open against `main`.
 updates:
   # Cargo dependencies.  Grouped aggressively: edamame has ~40 direct
   # dependencies and many more transitively, and ungrouped Dependabot on a
@@ -7,6 +13,7 @@ updates:
   # security-relevant ones get lost in it.
   - package-ecosystem: cargo
     directory: /
+    target-branch: develop
     schedule:
       interval: weekly
       day: monday
@@ -45,6 +52,7 @@ updates:
   # so the three actions that file uses are ignored wholesale below.
   - package-ecosystem: github-actions
     directory: /
+    target-branch: develop
     schedule:
       interval: weekly
       day: monday
