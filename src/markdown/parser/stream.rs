@@ -138,7 +138,7 @@ impl<'s> LineIndex<'s> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum LeafMode {
     /// A paragraph or heading: a new line's content begins only with the leaf's first event and
-    /// the first one after a soft or hard break.  A code span, math span, inline HTML or image
+    /// the first one after a soft or hard break, which may be a break itself.  A code span, math span, inline HTML or image
     /// is looked at too, since one running across lines makes its later lines start nothing.
     Prose,
     /// Code, frontmatter, raw HTML, a rule: a few events per line, every one looked at.
@@ -179,10 +179,13 @@ impl LeafRec {
                 Event::Start(pulldown_cmark::Tag::TableHead | pulldown_cmark::Tag::TableRow)
             ),
             LeafMode::Prose => match event {
+                // A break straight after another begins the line between them, which holds
+                // nothing else (`a⏎\⏎b`'s `\`).
                 Event::SoftBreak | Event::HardBreak => {
+                    let begins = self.take_pending();
                     self.line_pending = true;
                     self.break_end = Some(range.end);
-                    false
+                    begins
                 }
                 Event::Code(_)
                 | Event::InlineMath(_)

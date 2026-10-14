@@ -1291,6 +1291,21 @@ mod tests {
         );
     }
 
+    /// A line holding nothing but a hard break's `\` starts at it: the break after another
+    /// break begins the line between them.  It used to have no column, so the rows below it
+    /// shifted up a line.
+    #[test]
+    fn a_line_of_only_a_hard_break_starts_at_its_backslash() {
+        assert_eq!(
+            first_src("a\n\\\nb\n"),
+            src_lines(0, &[Some(0), Some(0), Some(0)])
+        );
+        assert_eq!(
+            first_src("a [\n  \\\n](u)\n"),
+            src_lines(0, &[Some(0), Some(2), Some(0)])
+        );
+    }
+
     #[test]
     fn chrome_lines_are_none() {
         // Fences, a setext underline, a table's delimiter row.

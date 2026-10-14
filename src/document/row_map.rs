@@ -15,6 +15,7 @@ use std::ops::Range;
 use crate::document::wrap::Indent;
 use crate::document::ParsedDoc;
 use crate::markdown::ast::{to_u32, ListItem};
+use crate::markdown::segment_break;
 use crate::markdown::table_layout::char_cells;
 use crate::markdown::{
     strip_atx_closing, Block, ColOrigin, ContentKind, InlineColMap, RowOrigin, SrcLines,
@@ -268,12 +269,21 @@ impl RowCache {
 #[derive(Debug, Clone)]
 pub(crate) struct JoinedMap {
     positions: Box<[RawPos]>,
-    /// Indices into `positions` of the rendered chars that stand for breaks, ascending.
-    breaks: Box<[usize]>,
+    /// Every break, in order.
+    breaks: Box<[Cut]>,
+}
+
+/// A break in a [`JoinedMap`]: where its rendered char is (or, for one that renders as nothing,
+/// the char after it), the line it ends, and how many chars it renders, 1 or 0.
+#[derive(Debug, Clone, Copy)]
+struct Cut {
+    at: usize,
+    line: usize,
+    len: usize,
 }
 
 impl JoinedMap {
-    /// The map over `slices`, as [`Row::slices`] cuts them.
+    /// The map over `slices`, as [`Row::slices`] cuts them, hard breaks kept.
     fn new(slices: &[(usize, usize, &str)], labels: &crate::markdown::RefLabels) -> Self {
         let joined: Vec<&str> = slices.iter().map(|&(_, _, s)| s).collect();
         let map = InlineColMap::build_inline(&joined.join("\n"), labels);
@@ -293,9 +303,36 @@ impl JoinedMap {
             }
         };
         let forward = &map.rendered_to_raw_vec()[..map.rendered_len()];
+        // One pass in rendered order, so in line order too: a vanished break comes before the
+        // char it sits before, even one that is a break itself.
+        let mut vanished = map.vanished_breaks().iter().peekable();
+        let mut breaks = Vec::new();
+        for (k, &raw) in forward.iter().enumerate() {
+            while let Some(&(at, raw)) = vanished.next_if(|&&(at, _)| at == k) {
+                breaks.push(Cut {
+                    at,
+                    line: pos(raw).line,
+                    len: 0,
+                });
+            }
+            if map.is_break(k) {
+                breaks.push(Cut {
+                    at: k,
+                    line: pos(raw).line,
+                    len: 1,
+                });
+            }
+        }
+        // Any sitting past the last char: a blank link's break, the link last and its fallback
+        // empty (`[⏎]()`).
+        breaks.extend(vanished.map(|&(at, raw)| Cut {
+            at,
+            line: pos(raw).line,
+            len: 0,
+        }));
         Self {
             positions: forward.iter().map(|&c| pos(c)).collect(),
-            breaks: (0..forward.len()).filter(|&k| map.is_break(k)).collect(),
+            breaks: breaks.into_boxed_slice(),
         }
     }
 
@@ -305,18 +342,14 @@ impl JoinedMap {
     fn part(&self, lines: Range<u32>) -> Option<Vec<RawPos>> {
         let (first, last) = (lines.start as usize, lines.end.saturating_sub(1) as usize);
         // A break's line never falls below an earlier one's.
-        let before = |line: usize| {
-            self.breaks
-                .partition_point(|&k| self.positions[k].line < line)
-        };
+        let before = |line: usize| self.breaks.partition_point(|cut| cut.line < line);
         let from = before(first)
             .checked_sub(1)
-            .map_or(0, |i| self.breaks[i] + 1);
+            .map_or(0, |i| self.breaks[i].at + self.breaks[i].len);
         let to = self
             .breaks
             .get(before(last))
-            .copied()
-            .unwrap_or(self.positions.len());
+            .map_or(self.positions.len(), |cut| cut.at);
         self.positions.get(from..to).map(<[RawPos]>::to_vec)
     }
 }
@@ -433,7 +466,7 @@ impl<'a> Row<'a> {
     }
 
     /// An inline row's (or flow's) lines, each sliced past its content column and mapped by
-    /// its own [`InlineColMap`], one space for each break; failing that, a joined map's part on
+    /// its own [`InlineColMap`], one space for each break that didn't vanish; failing that, a joined map's part on
     /// the row ([`JoinedMap::part`]), for an inline spanning a break
     /// (`*a⏎b*`).  Line by line first, since joined, a continuation reading `===` or `- a` turns
     /// into block syntax it wasn't in the document.  Accepted only when the map renders as many
@@ -452,15 +485,25 @@ impl<'a> Row<'a> {
         let lines = self.origin.lines.clone()?;
         let leaf = self.ast().and_then(|b| leaf_at(b, lines.start));
         let labels = self.parsed.ref_labels();
-        let slices = self.slices(lines.clone(), raw_col, leaf);
+        let slices = self.slices(lines.clone(), raw_col, leaf, false);
 
         let shown = self.content_len();
         let back_link = self.chars.ends_with(&[' ', '↩']);
         let fits = |len: usize| len == shown || (back_link && len + 2 == shown);
 
         let mut by_line = Vec::with_capacity(shown + 1);
+        let content = &self.chars[self.start..];
         for (i, &(line, col, slice)) in slices.iter().enumerate() {
-            if i > 0 {
+            // A break shows as a space unless it vanished: asked of the chars the row shows either
+            // side of it, as the renderer asked, the test can't misjudge a kept break, whose
+            // space never vanishes.  A map misaligned before this point fails `fits` below.
+            let at = by_line.len();
+            let vanished = at
+                .checked_sub(1)
+                .and_then(|before| content.get(before))
+                .zip(content.get(at))
+                .is_some_and(|(&before, &after)| segment_break::vanishes(before, after));
+            if i > 0 && !vanished {
                 let (prev, prev_col, prev_slice) = slices[i - 1];
                 by_line.push(RawPos {
                     line: prev,
@@ -493,11 +536,14 @@ impl<'a> Row<'a> {
                 let first_col = src.col(0)?;
                 self.parsed.with_joined_map(
                     (self.block, src.first),
-                    || JoinedMap::new(&self.slices(src.span(), first_col, leaf), labels),
+                    || JoinedMap::new(&self.slices(src.span(), first_col, leaf, true), labels),
                     |map| map.part(lines),
                 )?
             }
-            _ if slices.len() >= 2 => JoinedMap::new(&slices, labels).part(lines)?,
+            _ if slices.len() >= 2 => {
+                JoinedMap::new(&self.slices(lines.clone(), raw_col, leaf, true), labels)
+                    .part(lines)?
+            }
             _ => return None,
         };
         if !fits(joined.len()) {
@@ -508,13 +554,16 @@ impl<'a> Row<'a> {
     }
 
     /// `(line, first col, slice)` per line of `lines`: its text past its content column
-    /// (`first_col` on the first), less a hard break's trailing `\` and an ATX heading's
-    /// closing sequence.
+    /// (`first_col` on the first), less an ATX heading's closing sequence and, unless
+    /// `hard_breaks`, a hard break's trailing `\`.  Mapped alone, a line's break is a space past
+    /// its slice either way; joined, the `\` keeps it a hard break, which never vanishes
+    /// between CJK glyphs, and keeps a line of nothing else from reading as a blank one.
     fn slices(
         &self,
         lines: Range<u32>,
         first_col: u32,
         leaf: Option<&Block>,
+        hard_breaks: bool,
     ) -> Vec<(usize, usize, &'a str)> {
         let leaf_end = leaf.map_or(0, |l| l.span().end);
         let atx =
@@ -544,7 +593,7 @@ impl<'a> Row<'a> {
                 // unescaped: an odd run (`a\\\` is an escaped `\`, then the break).
                 let trailing = slice.chars().rev().take_while(|&c| c == '\\').count();
                 let slice = match slice.strip_suffix('\\') {
-                    Some(s) if l + 1 < leaf_end && trailing % 2 == 1 => s,
+                    Some(s) if !hard_breaks && l + 1 < leaf_end && trailing % 2 == 1 => s,
                     _ => slice,
                 };
                 let slice = if atx { strip_atx_closing(slice) } else { slice };

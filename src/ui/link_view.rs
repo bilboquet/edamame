@@ -17,6 +17,7 @@ use ratatui::text::Line;
 use crate::editor::link::LinkTarget;
 use crate::editor::EditorState;
 use crate::markdown::renderer::{paragraph_reflows, paragraph_row_inlines};
+use crate::markdown::table_layout::cells_of;
 use crate::markdown::{Block, Inline};
 
 /// One link-styled run the renderer emits, in document order.  The image-placeholder variant
@@ -167,8 +168,8 @@ fn extract_block_links(
         let Some(line) = state.parsed.lines.get(line_idx) else {
             continue;
         };
-        let underlined_ranges = underlined_char_ranges(line);
-        for (start_col, end_col) in underlined_ranges {
+        let chars: Vec<char> = line.spans.iter().flat_map(|s| s.content.chars()).collect();
+        for (start_col, end_col) in underlined_char_ranges(line) {
             // Every run consumes an entry, image placeholders included, to keep the pairing
             // aligned past an inline image.
             let Some(run) = link_iter.next() else {
@@ -178,14 +179,14 @@ fn extract_block_links(
                 continue;
             };
             let target = LinkTarget::parse(&url, base_dir);
-            // One snapshot covering the flat char range at the line's full row height;
+            // One snapshot covering the flat range, in cells, at the line's full row height;
             // per-row precision for wrapped links is not needed yet.
-            let width = end_col.saturating_sub(start_col);
+            let width = cells_of(&chars[start_col..end_col]);
             if width == 0 {
                 continue;
             }
             let rect = Rect {
-                x: area.x + start_col as u16,
+                x: area.x + cells_of(&chars[..start_col]) as u16,
                 y: area.y + y_start,
                 width: width as u16,
                 height: rows_used,
@@ -201,7 +202,8 @@ fn extract_block_links(
 }
 
 /// Char-column ranges of every run of consecutive `UNDERLINED` spans in `line`; adjacent spans
-/// coalesce so bold/italic substyling inside a link still yields one run.
+/// coalesce so bold/italic substyling inside a link still yields one run.  Two links side by side
+/// stay two: the renderer ends the first with an empty unstyled span (`render_inlines`).
 fn underlined_char_ranges(line: &Line<'_>) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut col = 0usize;
@@ -367,6 +369,33 @@ mod tests {
                 .map(|s| (s.url.as_str(), s.rect.x, s.rect.y, s.rect.width))
                 .collect();
             assert_eq!(got, expected, "reflow {reflow}");
+        }
+    }
+
+    /// Two links side by side, in the source or across a break that vanished between CJK
+    /// glyphs, are two runs, each pairing with its own URL, and the link after them still pairs
+    /// with its own.  Each rect is in cells, a wide glyph two of them.
+    #[test]
+    fn adjacent_links_pair_with_their_own_urls() {
+        let area = Rect::new(0, 0, 80, 10);
+        for src in [
+            "[日](a.md)\n[本](b.md) [c](c.md)\n",
+            "[日](a.md)[本](b.md) [c](c.md)\n",
+        ] {
+            let mut st = state(src);
+            st.mode = crate::editor::Mode::Rendered;
+            st.set_reflow(true);
+            st.sync_reflow_for_mode();
+            let snaps = build_snapshots(&st, area, 0);
+            let got: Vec<(&str, u16, u16)> = snaps
+                .iter()
+                .map(|s| (s.url.as_str(), s.rect.x, s.rect.width))
+                .collect();
+            assert_eq!(
+                got,
+                [("a.md", 0, 2), ("b.md", 2, 2), ("c.md", 5, 1)],
+                "{src:?}"
+            );
         }
     }
 

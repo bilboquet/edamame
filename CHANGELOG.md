@@ -18,7 +18,7 @@ Each released version's section is also what ships as the GitHub release notes: 
 
 - Heading links now use GitHub's anchors, so links to headings with non-Latin, accented or formatted text (`#日本語`, `#café`) work. A bare `#` link goes to the top of the document.
 - Tables inside list items, blockquotes and footnotes, and tables without edge pipes or with short rows, now work like any other table: one-cell editing, Tab, row and column commands, and the mouse handles.
-- CJK text now wraps between characters, keeps punctuation such as `。` and `「` with its text, and no longer adds blank rows in code blocks.
+- CJK text now wraps between characters, keeps punctuation such as `。` and `「` with its text, and no longer adds blank rows in code blocks. A reflowed paragraph no longer shows a space where a Chinese or Japanese line was wrapped in the source.
 - Accented letters and Korean text stored in decomposed form, common in files from macOS, now display correctly, and cursor keys in text fields move over a whole emoji or accented letter.
 - Fixed various layout bugs, mostly in lists, blockquotes, footnotes, tables and wrapped text: misplaced clicks, cursor, highlights and line numbers; missing or extra blank rows; and misaligned indentation.
 - HTML comments inside a list item, quote or footnote are now hidden, as they already were elsewhere.

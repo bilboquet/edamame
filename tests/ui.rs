@@ -859,6 +859,36 @@ fn a_prefix_before_long_cjk_text_keeps_it_on_its_row() {
     }
 }
 
+/// A reflowed paragraph's soft break between CJK glyphs renders as nothing (issue #79), as a
+/// browser renders it, at the top level and nested; beside Latin text or Hangul it stays a space.
+#[test]
+fn a_soft_break_between_cjk_glyphs_renders_as_nothing() {
+    use unicode_width::UnicodeWidthChar;
+
+    for (src, row) in [
+        ("日本語の\nリスト項目が\n", "日本語のリスト項目が"),
+        ("- 日本語の\n  リスト項目が\n", "• 日本語のリスト項目が"),
+        ("> 日本語の\n> リスト項目が\n", "▎ 日本語のリスト項目が"),
+        ("日本語の\n、続き\n", "日本語の、続き"),
+        ("**日本**\n*語*\n", "日本語"),
+        ("日本語の\nabc\n", "日本語の abc"),
+        ("한국어\n문장\n", "한국어 문장"),
+    ] {
+        // The buffer holds a wide glyph's second cell as a blank.
+        let row: String = row
+            .chars()
+            .flat_map(|c| [Some(c), (c.width() == Some(2)).then_some(' ')])
+            .flatten()
+            .collect();
+        let (rows, _) = paint_rows(src, 40, None);
+        assert_eq!(
+            rows.first().map(|r| r.trim_end()),
+            Some(row.trim_end()),
+            "{rows:?} in {src:?}"
+        );
+    }
+}
+
 /// A code line wider than the viewport with no break point of its own starts on its first row
 /// (issue #58): the only break used to be the pad cell, which left a blank row above the text.
 #[test]

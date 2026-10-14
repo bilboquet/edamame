@@ -74,7 +74,7 @@ pub(super) fn truncate_to_width(text: &str, width: usize) -> String {
 
 /// Display text for a link/image with empty bracket content: the full URL for
 /// web-style targets (a scheme or a `#` fragment), else the file name.
-pub(super) fn link_fallback(url: &str) -> String {
+pub(crate) fn link_fallback(url: &str) -> String {
     if has_url_scheme(url) || url.starts_with('#') {
         return url.to_string();
     }

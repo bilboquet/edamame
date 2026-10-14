@@ -309,7 +309,7 @@ fn check_doc(doc: &ParsedDoc) -> Result<(), String> {
                         && check_slices(&[slices.join("\n")], &shown, labels).is_ok();
                     let part = match real.and_then(|b| leaf_at(b, span.start)) {
                         Some(Block::Paragraph { src, .. }) => {
-                            let para: Vec<(u32, String)> = src
+                            let para: Vec<(u32, String, usize)> = src
                                 .span()
                                 .map(|l| {
                                     let text = lines.get(base + l as usize).copied().unwrap_or("");
@@ -322,17 +322,16 @@ fn check_doc(doc: &ParsedDoc) -> Result<(), String> {
                                                 as u32
                                         });
                                     let slice: String = text.chars().skip(col as usize).collect();
-                                    // Only an unescaped `\` breaks: an odd run.
-                                    let run = slice.chars().rev().take_while(|&c| c == '\\');
-                                    let slice = match slice.strip_suffix('\\') {
-                                        Some(s)
-                                            if l + 1 < src.span().end && run.count() % 2 == 1 =>
-                                        {
-                                            s.to_owned()
-                                        }
-                                        _ => slice,
-                                    };
-                                    (l, slice)
+                                    // The line's content, short of trailing whitespace and of
+                                    // a hard break's `\` (only an unescaped one breaks: an odd
+                                    // run), which its rendered char maps to.  Left in the slice:
+                                    // dropped, a line holding only the `\` would read as a blank
+                                    // one, ending the paragraph there.
+                                    let content = slice.trim_end();
+                                    let run = content.chars().rev().take_while(|&c| c == '\\');
+                                    let breaks = l + 1 < src.span().end && run.count() % 2 == 1;
+                                    let len = content.chars().count() - usize::from(breaks);
+                                    (l, slice, len)
                                 })
                                 .collect();
                             check_paragraph_part(&para, span.clone(), &shown, labels).is_ok()
@@ -496,28 +495,27 @@ fn check_slices(slices: &[String], shown: &[char], labels: &RefLabels) -> Result
     Ok(())
 }
 
-/// The paragraph whose `(line, slice)` pairs are `para`, mapped as one text joined by `\n`,
-/// renders on `lines` exactly the row's `shown` content: the rendered chars whose raw char lies
-/// in those lines' slices, short of the whitespace a break leaves at a slice's end, every letter
-/// or digit onto the same letter or digit.
+/// The paragraph whose `(line, slice, content length)` triples are `para`, mapped as one text
+/// joined by `\n`, renders on `lines` exactly the row's `shown` content: the rendered chars
+/// whose raw char lies in those lines' content, every letter or digit onto the same letter or
+/// digit.
 fn check_paragraph_part(
-    para: &[(u32, String)],
+    para: &[(u32, String, usize)],
     lines: std::ops::Range<u32>,
     shown: &[char],
     labels: &RefLabels,
 ) -> Result<(), String> {
     let text = para
         .iter()
-        .map(|(_, s)| s.as_str())
+        .map(|(_, s, _)| s.as_str())
         .collect::<Vec<_>>()
         .join("\n");
     let map = InlineColMap::build_inline(&text, labels);
     let raw: Vec<char> = text.chars().collect();
-    // Each of the row's lines as a raw char range, trailing whitespace off.
+    // Each of the row's lines' content as a raw char range.
     let mut ranges = Vec::new();
     let mut at = 0usize;
-    for (l, slice) in para {
-        let len = slice.trim_end().chars().count();
+    for (l, slice, len) in para {
         if lines.contains(l) {
             ranges.push(at..at + len);
         }
@@ -656,6 +654,37 @@ const CORPUS: &[&str] = &[
     // wrapping, and a 2-space nested item at its 4-cell nesting.
     "1. a\n2. b\n3. c\n4. d\n5. e\n6. alpha bravo charlie delta echo\n7. g\n8. h\n9. i\n10. j\n",
     "- a\n  - alpha bravo charlie\n    delta echo foxtrot\n- b\n",
+    // A soft break between CJK glyphs renders as nothing when the paragraph reflows (issue #79),
+    // at the top level and nested, beside markup and punctuation; beside Latin text or Hangul it
+    // stays a space, and a code span's line break is always one.  A multi-line setext heading's
+    // text joins the same way.
+    // (No line is exactly 12 cells wide, a known miss: see `KNOWN_REVEALED_MISSES`.)
+    "日本語の\nリスト\n",
+    "- 日本語の\n  リスト\n",
+    "> 日本語の\n> リスト\n",
+    "[^1]: 日本語の\n    リス\n\nref[^1]\n",
+    "日本語の\n、続き\n",
+    "**日本**\n語 *テキ\nスト* [リン\nク](u)\nabc\n한국어\n문장\n",
+    "前`日本\n語`後\n",
+    "日本\n語\n===\n\n日本\nabc\n---\n",
+    // A link with blank text shows its URL fallback: the URL, or a path's file name.  Two links
+    // a vanished break joins sit side by side.
+    "[日](a)\n[本](b)\n",
+    // A blank link over a break shows its fallback once: in a flow, leaving the later breaks'
+    // fates where they were; unreflowed, on its last line, where its destination is.  Inside
+    // emphasis, over a hard break or two, and last on its line too.
+    // (No line is exactly 12 cells wide, nor wraps there: see `KNOWN_REVEALED_MISSES`.)
+    "日本\n[\n](https://x.y)\nabc\n語\n本\n",
+    "a **[\n](./d/x.md)** b\n",
+    "a [\\\n](https://x.y) b\n",
+    "a [\n](https://x.y)\n",
+    "a [\n\\\n](https://x.y)\n",
+    // A line holding nothing but a hard break: its row shows nothing, on its own line.
+    "a\n\\\nb\n",
+    "- a\n  \\\n  b\n",
+    // A hard break between CJK glyphs stays a space, in the paragraph's joined map too.
+    "日本\\\n*語\n本* 語\n",
+    "日本\n[](u)\n\nsee [](./dir/plan.md \"plan\") and [ ](#top)\n",
 ];
 
 #[test]
@@ -689,6 +718,25 @@ fn blank_rows_are_their_virtual_blocks_only_line() {
         doc.row_origins()
     );
     assert!(blanks.iter().all(|o| o.lines == Some(0..1)));
+}
+
+/// A collapsed diagram reserves its image's rows (24 here, `build`'s image height), however many
+/// lines its source runs to; the last row shows every line past it, so each line has a row.
+/// Those lines showed on none, closed fence or not (proptest found it unclosed).
+#[test]
+fn a_diagram_taller_in_source_than_its_rows_ends_on_a_row_over_the_rest() {
+    let body = "  a --> b\n".repeat(24);
+    for src in [
+        format!("```mermaid\ngraph TD\n{body}```\n"),
+        format!("```mermaid\ngraph TD\n{body}"),
+    ] {
+        let doc = build(&src, false);
+        let lines = src.lines().count() as u32;
+        let origins = doc.row_origins();
+        assert_eq!(origins[22].lines, Some(22..23), "{src:?}");
+        assert_eq!(origins[23].lines, Some(23..lines), "{src:?}");
+        check(&src).unwrap();
+    }
 }
 
 /// A reflowed top-level paragraph is one row over all its lines.

@@ -19,6 +19,7 @@ use super::ast::{inlines_to_plain, to_u32, Block, Inline, LineSpan, MetadataKind
 use super::highlight::{self, Token};
 use super::render_cache::{is_cache_worthy, CachedRows, RenderCache, RenderSettings};
 use super::row_origin::{ContentKind, RowOrigin, RowSink};
+use super::segment_break;
 use super::table_layout::{self, str_cells};
 
 const IMAGE_PREFIX: &str = "Image: ";
@@ -544,9 +545,8 @@ impl<'t> Renderer<'t> {
         ]);
         // Reserved row `k` shows source line `k`, clamped to the last: a one-line image pins every
         // row to its line, and a diagram's reveal paints its source lines 1:1 onto these rows.
-        let last_line = src.len().saturating_sub(1);
-        let origin = |k: usize| RowOrigin::chrome(Some(line_at(src, k.min(last_line))));
-        out.push(placeholder, origin(0));
+        // The last row also shows every line past it, so each line has a row while a diagram
+        // taller in source than its image is collapsed.
         let ordinal = self.image_block_seq.get();
         self.image_block_seq.set(ordinal + 1);
         let rows = self
@@ -554,6 +554,21 @@ impl<'t> Renderer<'t> {
             .and_then(|f| f(url, ordinal))
             .unwrap_or(self.image_max_height)
             .max(1);
+        let last_line = src.len().saturating_sub(1);
+        let origin = |k: usize| {
+            let line = line_at(src, k.min(last_line));
+            let end = if k + 1 == rows {
+                line_at(src, src.len()).max(line + 1)
+            } else {
+                line + 1
+            };
+            RowOrigin {
+                lines: Some(line..end),
+                cols: super::row_origin::ColOrigin::Chrome,
+                hang: 0,
+            }
+        };
+        out.push(placeholder, origin(0));
         for k in 1..rows {
             out.push(Line::raw(""), origin(k));
         }
@@ -602,9 +617,10 @@ impl<'t> Renderer<'t> {
         let style = self.theme.heading_style(level);
         let prefix_style = style.remove_modifier(Modifier::UNDERLINED | Modifier::CROSSED_OUT);
         let mut spans = vec![Span::styled(prefix, prefix_style)];
-        spans.extend(self.render_inlines(inlines, style));
+        // A multi-line setext heading's text joins onto one row: a flow, whose soft breaks
+        // render as a paragraph's do.
+        spans.extend(self.render_inlines(&collapse_soft_breaks(inlines), style));
 
-        // A multi-line setext heading's text joins onto one row: a flow.
         let kind = if text_lines > 1 {
             ContentKind::Flow
         } else {
@@ -1076,6 +1092,12 @@ impl<'t> Renderer<'t> {
                 i += run_len;
                 continue;
             }
+            // Two links side by side (`[a](x)[b](y)`, or across a vanished break) would read as
+            // one run to the hit maps, which find a link by its style (`ui::link_view`,
+            // `editor::mouse_ops::links`), so an empty unstyled span ends the first.
+            if i > 0 && link_at_edge(&inlines[i - 1], true) && link_at_edge(&inlines[i], false) {
+                out.push(Span::raw(""));
+            }
             out.extend(self.render_inline(&inlines[i], base));
             i += 1;
         }
@@ -1121,7 +1143,7 @@ impl<'t> Renderer<'t> {
             Inline::Link { text, url, .. } => {
                 // Per-link style by URL kind.
                 let style = link_style_for(url, self.theme);
-                if inlines_to_plain(text).trim().is_empty() {
+                if shows_fallback(text) {
                     vec![Span::styled(link_fallback(url), style)]
                 } else {
                     self.render_inlines(text, style)
@@ -1282,15 +1304,116 @@ pub(crate) fn paragraph_reflows(reflow: bool, inlines: &[Inline]) -> bool {
     reflow && !holds(inlines, |i| matches!(i, Inline::HardBreak))
 }
 
-/// The inlines a paragraph's rows are cut from: as parsed when `join` keeps them one flow, else
-/// with every emphasis, link and highlight a break falls inside cut in two at it
-/// ([`split_at_breaks`]), so each source line's text is a top-level segment of its own.
+/// The inlines a paragraph's rows are cut from: when `join` keeps them one flow, as parsed less
+/// the soft breaks that render as nothing ([`collapse_soft_breaks`]), else with every emphasis,
+/// link and highlight a break falls inside cut in two at it ([`split_at_breaks`]), so each
+/// source line's text is a top-level segment of its own.
 pub(crate) fn paragraph_row_inlines(inlines: &[Inline], join: bool) -> Cow<'_, [Inline]> {
     if join {
-        Cow::Borrowed(inlines)
+        collapse_soft_breaks(inlines)
     } else {
         split_at_breaks(inlines)
     }
+}
+
+/// `inlines` less every soft break that renders as nothing in a flow: one between two CJK glyphs
+/// ([`segment_break::vanishes`]), judged on the chars rendered either side of it, at any depth
+/// (`**日本**⏎語`).  The rest still render as a space.  Borrowed when none vanishes, as in
+/// every paragraph that isn't CJK.
+pub(crate) fn collapse_soft_breaks(inlines: &[Inline]) -> Cow<'_, [Inline]> {
+    if !holds(inlines, |i| matches!(i, Inline::SoftBreak)) {
+        return Cow::Borrowed(inlines);
+    }
+    let mut scan = BreakScan::default();
+    scan.walk(inlines);
+    if !scan.vanishing.contains(&true) {
+        return Cow::Borrowed(inlines);
+    }
+    let mut vanishing = scan.vanishing.into_iter();
+    Cow::Owned(drop_vanishing(inlines, &mut vanishing))
+}
+
+/// Each soft break's fate, in render order, from the chars rendered around it.
+#[derive(Default)]
+struct BreakScan {
+    /// Per soft break: whether it vanishes.
+    vanishing: Vec<bool>,
+    /// The last char rendered so far; a break counts as the space it renders until the chars
+    /// after it say otherwise, so of two breaks with nothing between them, neither vanishes.
+    last: Option<char>,
+    /// The break waiting on the char after it: its index and the char before it.
+    pending: Option<(usize, char)>,
+}
+
+impl BreakScan {
+    fn walk(&mut self, inlines: &[Inline]) {
+        for inline in inlines {
+            match inline {
+                Inline::Text(t) | Inline::Html(t) | Inline::Code(t) => self.text(t),
+                Inline::Bold(inner)
+                | Inline::Italic(inner)
+                | Inline::Strikethrough(inner)
+                | Inline::Highlight(inner) => self.walk(inner),
+                // As `render_inline` shows it: the text, or the URL fallback for a blank one.
+                Inline::Link { text, url, .. } => {
+                    if shows_fallback(text) {
+                        self.text(&link_fallback(url));
+                    } else {
+                        self.walk(text);
+                    }
+                }
+                // `[Image: …]` and a `[label]` marker.
+                Inline::Image { .. } | Inline::FootnoteReference { .. } => self.text("[]"),
+                Inline::Math { .. } => self.text("$"),
+                Inline::HtmlComment(_) => {}
+                Inline::HardBreak => self.text(" "),
+                Inline::SoftBreak => {
+                    self.pending = self.last.map(|before| (self.vanishing.len(), before));
+                    self.vanishing.push(false);
+                    self.last = Some(' ');
+                }
+            }
+        }
+    }
+
+    /// Rendered text: only its first and last chars matter.
+    fn text(&mut self, text: &str) {
+        let Some(first) = text.chars().next() else {
+            return;
+        };
+        if let Some((k, before)) = self.pending.take() {
+            self.vanishing[k] = segment_break::vanishes(before, first);
+        }
+        self.last = text.chars().next_back();
+    }
+}
+
+/// `inlines` with each soft break `vanishing` says vanishes (one entry per break, in order) left
+/// out.  A link showing its URL fallback is left whole: [`BreakScan`] reads none of its text,
+/// so gives the breaks in it no entry.
+fn drop_vanishing(inlines: &[Inline], vanishing: &mut impl Iterator<Item = bool>) -> Vec<Inline> {
+    let mut out = Vec::with_capacity(inlines.len());
+    for inline in inlines {
+        match inline {
+            Inline::SoftBreak => {
+                if vanishing.next() != Some(true) {
+                    out.push(Inline::SoftBreak);
+                }
+            }
+            Inline::Link { text, .. } if shows_fallback(text) => out.push(inline.clone()),
+            _ => match children(inline).filter(|c| holds(c, |i| matches!(i, Inline::SoftBreak))) {
+                Some(inner) => out.push(with_children(inline, drop_vanishing(inner, vanishing))),
+                None => out.push(inline.clone()),
+            },
+        }
+    }
+    out
+}
+
+/// Whether a link with `text` renders its URL fallback ([`link_fallback`]) instead: its text
+/// renders blank.
+fn shows_fallback(text: &[Inline]) -> bool {
+    inlines_to_plain(text).trim().is_empty()
 }
 
 /// `inlines` with every soft or hard break lifted to the top level: a container a break falls
@@ -1311,12 +1434,19 @@ pub(crate) fn split_at_breaks(inlines: &[Inline]) -> Cow<'_, [Inline]> {
     Cow::Owned(out)
 }
 
-/// Push `inline` onto `out`, cut at every break inside it (see [`split_at_breaks`]).
+/// Push `inline` onto `out`, cut at every break inside it (see [`split_at_breaks`]).  A link
+/// showing its URL fallback has no halves to show: its breaks come first, then the link, so the
+/// fallback shows once, on its last line, where its destination is.
 fn push_split(inline: &Inline, out: &mut Vec<Inline>) {
     let Some(inner) = children(inline).filter(|c| holds(c, is_break)) else {
         out.push(inline.clone());
         return;
     };
+    if matches!(inline, Inline::Link { text, .. } if shows_fallback(text)) {
+        push_breaks(inner, out);
+        out.push(with_children(inline, Vec::new()));
+        return;
+    }
     let mut flat = Vec::with_capacity(inner.len() + 2);
     for child in inner {
         push_split(child, &mut flat);
@@ -1337,6 +1467,17 @@ fn push_split(inline: &Inline, out: &mut Vec<Inline>) {
     }
 }
 
+/// Push every break in `inlines`, at any depth, onto `out`.
+fn push_breaks(inlines: &[Inline], out: &mut Vec<Inline>) {
+    for inline in inlines {
+        if is_break(inline) {
+            out.push(inline.clone());
+        } else if let Some(inner) = children(inline) {
+            push_breaks(inner, out);
+        }
+    }
+}
+
 fn is_break(inline: &Inline) -> bool {
     matches!(inline, Inline::SoftBreak | Inline::HardBreak)
 }
@@ -1346,6 +1487,17 @@ fn holds(inlines: &[Inline], pred: impl Fn(&Inline) -> bool + Copy) -> bool {
     inlines
         .iter()
         .any(|i| pred(i) || children(i).is_some_and(|c| holds(c, pred)))
+}
+
+/// Whether `inline` renders a link first (`end` false) or last: it is one, or its first or last
+/// child does.
+fn link_at_edge(inline: &Inline, end: bool) -> bool {
+    match inline {
+        Inline::Link { .. } => true,
+        _ => children(inline)
+            .and_then(|c| if end { c.last() } else { c.first() })
+            .is_some_and(|c| link_at_edge(c, end)),
+    }
 }
 
 /// The inlines inside an emphasis, link or highlight; `None` for a leaf.
@@ -1783,6 +1935,25 @@ mod tests {
         assert_eq!(texts, vec!["one", "two", "three"]);
     }
 
+    /// Unreflowed, a link with blank text over a break shows its URL fallback once, on its last
+    /// line, where its destination is, however deep it sits and whatever the break; its halves
+    /// used to be dropped as empty, so it showed nowhere.
+    #[test]
+    fn a_blank_link_over_a_break_shows_its_fallback_on_its_last_line() {
+        for (src, rows) in [
+            ("a [\n](https://x) b\n", &["a ", "https://x b"][..]),
+            ("a **[\n](./d/x.md)** b\n", &["a ", "x.md b"]),
+            ("a [\\\n](https://x) b\n", &["a ", "https://x b"]),
+        ] {
+            let lines = renderer().with_viewport_width(80).render(&parse(src));
+            let texts: Vec<String> = lines
+                .iter()
+                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+                .collect();
+            assert_eq!(texts, rows, "{src:?}");
+        }
+    }
+
     /// With reflow on, soft breaks become spaces and the paragraph flows to one
     /// row when it fits the viewport.
     #[test]
@@ -1794,6 +1965,111 @@ mod tests {
         assert_eq!(lines.len(), 1, "soft-broken lines should reflow to one row");
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text.trim_end(), "one two three");
+    }
+
+    /// A reflowed soft break between CJK glyphs renders as nothing (issue #79), judged on the
+    /// chars rendered either side of it at any depth: inside emphasis, beside it, at a link's
+    /// edge.  Beside Latin text, Hangul, an image placeholder's bracket or another break it stays
+    /// a space.  A link showing its URL fallback has no say over the breaks in its blank text,
+    /// nor do they shift any later break's fate.  `inlines_to_plain` drops the same breaks,
+    /// wherever it reads the same text (`None`); it reads an image as its alt text, without the
+    /// placeholder, and a blank link as its text, not the fallback.
+    #[test]
+    fn reflow_drops_a_soft_break_between_cjk_glyphs() {
+        for (src, flow, plain) in [
+            ("日本語の\nリスト\n", "日本語のリスト", None),
+            ("日本\n、続き\n", "日本、続き", None),
+            ("**日本**\n*語*\n", "日本語", None),
+            ("*日\n本*\n", "日本", None),
+            ("[日\n本](u)\n語\n", "日本語", None),
+            ("日本\nabc\n", "日本 abc", None),
+            ("abc\n日本\n", "abc 日本", None),
+            ("한국어\n문장\n", "한국어 문장", None),
+            (
+                "日本\n![画像](x.png)\n",
+                "日本 [Image: 画像]",
+                Some("日本画像"),
+            ),
+            ("前`日本\n語`後\n", "前日本 語後", None),
+            (
+                "日本\n[\n](https://x)\nabc\n語\n本\n",
+                "日本 https://x abc 語本",
+                Some("日本   abc 語本"),
+            ),
+        ] {
+            let blocks = parse(src);
+            let lines = renderer()
+                .with_viewport_width(80)
+                .with_reflow_paragraphs(true)
+                .render(&blocks);
+            let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(text.trim_end(), flow, "{src:?}");
+            let Block::Paragraph { inlines, .. } = &blocks[0] else {
+                panic!("{blocks:?}");
+            };
+            assert_eq!(
+                inlines_to_plain(inlines),
+                plain.unwrap_or(flow),
+                "plain text of {src:?}"
+            );
+        }
+    }
+
+    /// Two links side by side end the first with an empty unstyled span, so the hit maps, which
+    /// find a link by its style, see two runs: a vanished break joins them (`[日](a)⏎[本](b)`),
+    /// as can the source, nested or not.  A link beside text, or a break's space, needs none.
+    #[test]
+    fn adjacent_links_are_separated_by_an_empty_span() {
+        for (src, spans) in [
+            ("[日](a)\n[本](b)\n", &["日", "", "本"][..]),
+            ("[a](x)[b](y)\n", &["a", "", "b"]),
+            ("**[a](x)**[b](y)\n", &["a", "", "b"]),
+            ("[a](x)\n[b](y)c\n", &["a", " ", "b", "c"]),
+        ] {
+            let lines = renderer()
+                .with_viewport_width(80)
+                .with_reflow_paragraphs(true)
+                .render(&parse(src));
+            let got: Vec<&str> = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(got, spans, "{src:?}");
+        }
+    }
+
+    /// A multi-line setext heading's soft break between CJK glyphs renders as nothing, as a
+    /// reflowed paragraph's does; beside Latin text it stays a space.
+    #[test]
+    fn setext_heading_drops_a_soft_break_between_cjk_glyphs() {
+        for (src, row) in [
+            ("日本\n語\n===\n", " 日本語"),
+            ("日本\nabc\n---\n", "  日本 abc"),
+        ] {
+            let lines = renderer().with_viewport_width(80).render(&parse(src));
+            let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(text.trim_end(), row, "{src:?}");
+        }
+    }
+
+    /// A paragraph with no vanishing break is borrowed as parsed; one with one loses just that
+    /// break.  Without reflow nothing is dropped: each line is a row of its own.
+    #[test]
+    fn collapse_soft_breaks_borrows_unless_a_break_vanishes() {
+        let blocks = parse("one\ntwo *three\nfour*\n");
+        let Block::Paragraph { inlines, .. } = &blocks[0] else {
+            panic!("{blocks:?}");
+        };
+        assert!(matches!(collapse_soft_breaks(inlines), Cow::Borrowed(_)));
+        let blocks = parse("日本\n語\n");
+        let Block::Paragraph { inlines, .. } = &blocks[0] else {
+            panic!("{blocks:?}");
+        };
+        assert_eq!(
+            collapse_soft_breaks(inlines).as_ref(),
+            [Inline::Text("日本".into()), Inline::Text("語".into())]
+        );
+        assert!(matches!(
+            paragraph_row_inlines(inlines, false),
+            Cow::Borrowed(_)
+        ));
     }
 
     /// A paragraph containing a hard break does not reflow at all: it would render as several

@@ -243,6 +243,8 @@ src/
     render_cache.rs # memoization keyed by Block value + settings fingerprint
     row_origin.rs   # RowOrigin (lines + column relation per rendered row), RowSink
     renderer.rs (+ renderer/{list,table,util}.rs)  # Vec<Block> → Vec<Line<'static>>
+    segment_break.rs # whether a joined soft break renders as a space or as nothing (CJK);
+                    #   the one test the renderer, inline_col_map and row_map share
     table_layout.rs # column widths in terminal cells (str_cells), the one shared cell
                     #   wrap (wrap_ranges / word_ranges), pipe positions, and the
                     #   packed-comment hints

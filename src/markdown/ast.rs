@@ -2,6 +2,8 @@ use std::ops::Range;
 
 use pulldown_cmark::HeadingLevel;
 
+use super::segment_break;
+
 // ─── Source positions ─────────────────────────────────────────────────────────
 
 /// Where a leaf block's content sits in the source, relative to its top-level block's first line.
@@ -368,10 +370,26 @@ pub fn heading_plain_text(inlines: &[Inline]) -> String {
     inlines_to_plain(inlines).replace('\n', " ")
 }
 
-/// Flatten inlines to a plain text string (no styling).
+/// Flatten inlines to a plain text string (no styling).  A soft break is a space, or nothing
+/// between two CJK glyphs ([`segment_break::vanishes`]), as a flow renders it between the same
+/// text (the renderer frames an image's alt text in a placeholder, this doesn't).  The parser
+/// builds an image's alt text here too, so `![日本⏎語](x)`'s is `日本語`.
 pub fn inlines_to_plain(inlines: &[Inline]) -> String {
     let mut out = String::new();
-    push_plain(inlines, false, &mut out);
+    let mut soft_breaks = Vec::new();
+    push_plain(inlines, false, &mut out, &mut soft_breaks);
+    // Last first, so each earlier break's byte offset still holds.  A break next to another
+    // sits next to its space, so its fate doesn't hang on the other's.
+    for at in soft_breaks.into_iter().rev() {
+        let before = out[..at].chars().next_back();
+        let after = out[at + 1..].chars().next();
+        if before
+            .zip(after)
+            .is_some_and(|(b, a)| segment_break::vanishes(b, a))
+        {
+            out.remove(at);
+        }
+    }
     out
 }
 
@@ -381,11 +399,13 @@ pub fn inlines_to_plain(inlines: &[Inline]) -> String {
 /// `Foo` / `bar` heading is `#foobar`).
 pub fn heading_slug_text(inlines: &[Inline]) -> String {
     let mut out = String::new();
-    push_plain(inlines, true, &mut out);
+    push_plain(inlines, true, &mut out, &mut Vec::new());
     out
 }
 
-fn push_plain(inlines: &[Inline], for_slug: bool, out: &mut String) {
+/// Push `inlines`' text onto `out`, and the byte offset of each soft break's space onto
+/// `soft_breaks` (`for_slug` pushes a newline instead, and no offset).
+fn push_plain(inlines: &[Inline], for_slug: bool, out: &mut String, soft_breaks: &mut Vec<usize>) {
     for inline in inlines {
         match inline {
             Inline::Text(t) => out.push_str(t),
@@ -394,9 +414,9 @@ fn push_plain(inlines: &[Inline], for_slug: bool, out: &mut String) {
             Inline::Bold(inner)
             | Inline::Italic(inner)
             | Inline::Strikethrough(inner)
-            | Inline::Highlight(inner) => push_plain(inner, for_slug, out),
+            | Inline::Highlight(inner) => push_plain(inner, for_slug, out, soft_breaks),
             Inline::Code(c) => out.push_str(c),
-            Inline::Link { text, .. } => push_plain(text, for_slug, out),
+            Inline::Link { text, .. } => push_plain(text, for_slug, out, soft_breaks),
             Inline::Image { alt, .. } if !for_slug => out.push_str(alt),
             Inline::Image { .. } => {}
             Inline::HtmlComment(_) => {}
@@ -410,7 +430,11 @@ fn push_plain(inlines: &[Inline], for_slug: bool, out: &mut String) {
                 out.push_str(source);
                 out.push_str(delim);
             }
-            Inline::SoftBreak => out.push(if for_slug { '\n' } else { ' ' }),
+            Inline::SoftBreak if for_slug => out.push('\n'),
+            Inline::SoftBreak => {
+                soft_breaks.push(out.len());
+                out.push(' ');
+            }
             Inline::HardBreak => out.push('\n'),
         }
     }
@@ -438,6 +462,33 @@ mod tests {
         ];
         assert_eq!(inlines_to_plain(&inlines), "a alt<b>b</b> c");
         assert_eq!(heading_slug_text(&inlines), "a b\nc");
+    }
+
+    /// A soft break is a space in plain text, or nothing between two CJK glyphs (issue #79), as a
+    /// reflowed paragraph renders it; a slug's is a newline either way.
+    #[test]
+    fn plain_text_drops_a_soft_break_between_cjk_glyphs() {
+        let inlines = [
+            Inline::Text("日本".into()),
+            Inline::SoftBreak,
+            Inline::Italic(vec![Inline::Text("語".into())]),
+            Inline::SoftBreak,
+            Inline::Text("abc".into()),
+        ];
+        assert_eq!(inlines_to_plain(&inlines), "日本語 abc");
+        assert_eq!(heading_slug_text(&inlines), "日本\n語\nabc");
+        let two = [
+            Inline::Text("日".into()),
+            Inline::SoftBreak,
+            Inline::HtmlComment("<!-- c -->".into()),
+            Inline::SoftBreak,
+            Inline::Text("本".into()),
+        ];
+        assert_eq!(
+            inlines_to_plain(&two),
+            "日  本",
+            "a break beside a break stays"
+        );
     }
 
     /// Every line of each shape, read back through the accessors.

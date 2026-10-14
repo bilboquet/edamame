@@ -2631,6 +2631,25 @@ fn each_item_of_a_link_list_resolves_to_its_own_url() {
     );
 }
 
+/// Two links a vanished break joins (`[日本](a)⏎[語](b)`, CJK text hard-wrapped in the source)
+/// render side by side with no space between them, and each still resolves to its own URL, as
+/// does the link after them.
+#[test]
+fn adjacent_links_joined_by_a_vanished_break_resolve_to_their_own_urls() {
+    let mut st = state("x\n\n[日本](a.md)\n[語](b.md) [c](c.md)\n");
+    st.mode = edamame::editor::Mode::Rendered;
+    st.set_reflow(true);
+    st.sync_reflow_for_mode();
+    // `日本語 c` on row 2, the cursor on row 0: `日本` at cells 0-3, `語` at 4-5, `c` at 7.
+    for (col, url) in [(0, "a.md"), (4, "b.md"), (7, "c.md")] {
+        assert_eq!(
+            mouse_ops::hovered_link_url(&st, col, 2, VW).as_deref(),
+            Some(url),
+            "cell {col}"
+        );
+    }
+}
+
 /// The default theme underlines H2-H6, so the old underline-marker test
 /// classified a heading as a link — and then resolved it against
 /// whatever block the (wrap-blind) row lookup landed on, which for a

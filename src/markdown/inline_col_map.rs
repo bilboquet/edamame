@@ -1,6 +1,9 @@
 use std::collections::HashSet;
 
-use pulldown_cmark::{BrokenLink, CowStr, Event, Options, Parser};
+use pulldown_cmark::{BrokenLink, CowStr, Event, Options, Parser, Tag, TagEnd};
+
+use super::renderer::util::link_fallback;
+use super::segment_break;
 
 /// The labels a document defines, so a map built over one line of it resolves `[text][label]`
 /// and `[^label]` the way the document's own parse did: a line parsed alone has no definitions
@@ -67,24 +70,38 @@ pub fn strip_atx_closing(content: &str) -> &str {
 #[derive(Debug, Clone)]
 pub struct InlineColMap {
     rendered_to_raw: Vec<usize>,
-    /// The raw char of each soft or hard break, ascending: where the rendered char that stands
-    /// for it maps.  No text char maps there (a break's raw run, `\n`, `\` or trailing spaces,
-    /// is never text), so these tell the breaks apart in the forward map.
+    /// The raw char of each soft or hard break that renders as a space, ascending: where the
+    /// rendered char that stands for it maps.  No text char maps there (a break's raw run, `\n`,
+    /// `\` or trailing spaces, is never text), so these tell the breaks apart in the forward map.
     breaks: Vec<usize>,
+    /// Each break that renders as nothing, and so has no entry in the forward map: a soft one
+    /// between CJK glyphs ([`segment_break::vanishes`]), or any inside a link that shows its URL
+    /// fallback.  For each, the rendered char it sits before, and its raw char.
+    vanished: Vec<(usize, usize)>,
     raw_to_rendered: Vec<usize>,
     rendered_len: usize,
     raw_len: usize,
 }
 
+/// A walk's output: each rendered char with its raw char, before any soft break is dropped,
+/// and the raw chars of the breaks among them, all of them and the soft ones.  An entry with no
+/// char is a break inside a link that shows its URL fallback: it renders nothing, but still ends
+/// its line.
+struct Walked {
+    entries: Vec<(usize, Option<char>)>,
+    breaks: Vec<usize>,
+    soft: Vec<usize>,
+}
+
 impl InlineColMap {
     pub fn build(raw_line: &str) -> Self {
-        Self::build_with(raw_line, None)
+        let raw_len = raw_line.chars().count();
+        Self::from_walk(Self::walk(raw_line, None), raw_len)
     }
 
-    /// [`build`](Self::build), resolving references against `labels` when given.  Without
-    /// them every `[^label]` collapses to a marker and no `[text][label]` resolves.
-    fn build_with(raw_line: &str, labels: Option<&RefLabels>) -> Self {
-        let raw_len = raw_line.chars().count();
+    /// The rendered chars of `raw_line`, resolving references against `labels` when given.
+    /// Without them every `[^label]` collapses to a marker and no `[text][label]` resolves.
+    fn walk(raw_line: &str, labels: Option<&RefLabels>) -> Walked {
         let mut walk = CharMapWalk::new(raw_line);
 
         let opts = Options::ENABLE_TABLES
@@ -102,15 +119,26 @@ impl InlineColMap {
                 .map(|_| (CowStr::Borrowed(""), CowStr::Borrowed("")))
         };
         let parser = Parser::new_with_broken_link_callback(raw_line, opts, Some(resolve));
+        // The open link: where the walk stood at its start, its destination and its range.
+        let mut link = None;
         for (event, range) in parser.into_offset_iter() {
             match event {
+                Event::Start(Tag::Link { dest_url, .. }) => {
+                    link = Some((walk.mark(), dest_url, range));
+                }
+                Event::End(TagEnd::Link) => {
+                    if let Some((mark, url, range)) = link.take() {
+                        walk.end_link(raw_line, mark, &url, range);
+                    }
+                }
                 Event::Text(text) => walk.push_text(raw_line, range, &text),
                 Event::Code(s) => walk.push_code(raw_line, &s, range),
                 // Math renders as its delimited source.  Parsed as math, not text, so it splits
                 // the text around it as the parser does: `y== $a$ ==x` holds no highlight.
                 Event::InlineMath(s) => walk.push_math(&s, "$", range),
                 Event::DisplayMath(s) => walk.push_math(&s, "$$", range),
-                Event::SoftBreak | Event::HardBreak => walk.push_break(range.start),
+                Event::SoftBreak => walk.push_break(range.start, true),
+                Event::HardBreak => walk.push_break(range.start, false),
                 // The renderer shows inline HTML as its text, except a lone comment.
                 Event::InlineHtml(s)
                     if !crate::markdown::parser::post_pass::is_html_comment_only(&s) =>
@@ -125,10 +153,13 @@ impl InlineColMap {
             }
         }
 
-        let breaks = walk.breaks.clone();
-        let mut rendered_to_raw = walk.finish();
-        collapse_footnote_refs(raw_line, labels, &mut rendered_to_raw);
-        Self::from_forward(rendered_to_raw, breaks, raw_len)
+        let mut entries = walk.map;
+        collapse_footnote_refs(raw_line, labels, &mut entries);
+        Walked {
+            entries,
+            breaks: walk.breaks,
+            soft: walk.soft,
+        }
     }
 
     /// A map over `text` read as inline content *inside* a paragraph: a line's text past its
@@ -138,22 +169,61 @@ impl InlineColMap {
     /// document's `labels`.
     pub fn build_inline(text: &str, labels: &RefLabels) -> Self {
         const PIN: &str = "a ";
-        let pinned = Self::build_with(&format!("{PIN}{text}"), Some(labels));
+        let pinned = Self::walk(&format!("{PIN}{text}"), Some(labels));
         let pin = PIN.len();
-        let forward = pinned
-            .rendered_to_raw
-            .iter()
-            .filter(|&&raw| raw >= pin)
-            .map(|&raw| raw - pin)
-            .collect();
-        let breaks = pinned.breaks.iter().map(|&raw| raw - pin).collect();
-        Self::from_forward(forward, breaks, pinned.raw_len.saturating_sub(pin))
+        let unpin = |raws: Vec<usize>| raws.into_iter().map(|raw| raw - pin).collect();
+        let walked = Walked {
+            entries: pinned
+                .entries
+                .into_iter()
+                .filter(|&(raw, _)| raw >= pin)
+                .map(|(raw, ch)| (raw - pin, ch))
+                .collect(),
+            breaks: unpin(pinned.breaks),
+            soft: unpin(pinned.soft),
+        };
+        Self::from_walk(walked, text.chars().count())
     }
 
-    /// The map from its forward half: `rendered_to_raw[k]` is rendered char `k`'s raw char, and
-    /// its last entry is the end sentinel `raw_len`.
-    fn from_forward(rendered_to_raw: Vec<usize>, breaks: Vec<usize>, raw_len: usize) -> Self {
-        let rendered_len = rendered_to_raw.len().saturating_sub(1);
+    /// The map from a walk over `raw_len` raw chars, less the breaks that render as nothing: those
+    /// inside a link showing its URL fallback, and the soft ones between two rendered chars
+    /// [`segment_break::vanishes`] drops a break between, as the renderer does when a paragraph
+    /// reflows (`renderer::collapse_soft_breaks`).  A break beside another break sits beside a
+    /// space.
+    fn from_walk(walked: Walked, raw_len: usize) -> Self {
+        let Walked {
+            entries,
+            mut breaks,
+            soft,
+        } = walked;
+        let chars: Vec<char> = entries.iter().filter_map(|&(_, c)| c).collect();
+        let mut rendered_to_raw = Vec::with_capacity(entries.len() + 1);
+        let mut vanished = Vec::new();
+        // Index into `chars` of the next entry with a char.
+        let mut k = 0usize;
+        for &(raw, ch) in &entries {
+            if ch.is_none() {
+                vanished.push((rendered_to_raw.len(), raw));
+                continue;
+            }
+            let neighbors = k
+                .checked_sub(1)
+                .and_then(|p| chars.get(p))
+                .zip(chars.get(k + 1));
+            k += 1;
+            let vanishes = soft.binary_search(&raw).is_ok()
+                && neighbors
+                    .is_some_and(|(&before, &after)| segment_break::vanishes(before, after));
+            if vanishes {
+                vanished.push((rendered_to_raw.len(), raw));
+            } else {
+                rendered_to_raw.push(raw);
+            }
+        }
+        // Ascending in raw char, as the entries are.
+        breaks.retain(|&raw| vanished.binary_search_by_key(&raw, |&(_, v)| v).is_err());
+        rendered_to_raw.push(raw_len);
+        let rendered_len = rendered_to_raw.len() - 1;
 
         // Inverse map: raw char idx -> rendered char idx.
         let mut raw_to_rendered = vec![usize::MAX; raw_len + 1];
@@ -176,6 +246,7 @@ impl InlineColMap {
         Self {
             rendered_to_raw,
             breaks,
+            vanished,
             raw_to_rendered,
             rendered_len,
             raw_len,
@@ -229,6 +300,12 @@ impl InlineColMap {
             .get(rendered_char)
             .is_some_and(|raw| self.breaks.binary_search(raw).is_ok())
     }
+
+    /// The breaks that render as nothing (see the field), ascending: for each, the rendered char
+    /// it sits before and its own raw char.
+    pub fn vanished_breaks(&self) -> &[(usize, usize)] {
+        &self.vanished
+    }
 }
 
 // ── Walker ──────────────────────────────────────────────────────────────────
@@ -236,9 +313,11 @@ impl InlineColMap {
 struct CharMapWalk {
     byte_to_char: Vec<usize>,
     total_chars: usize,
-    map: Vec<usize>,
-    /// The raw char of each break pushed.
+    /// Each rendered char, with its raw char; see [`Walked::entries`].
+    map: Vec<(usize, Option<char>)>,
+    /// The raw char of each break pushed, and of each soft one.
     breaks: Vec<usize>,
+    soft: Vec<usize>,
 }
 
 impl CharMapWalk {
@@ -255,6 +334,52 @@ impl CharMapWalk {
             total_chars: char_idx,
             map: Vec::new(),
             breaks: Vec::new(),
+            soft: Vec::new(),
+        }
+    }
+
+    /// Where the walk stands, for [`end_link`](Self::end_link) to roll back to.
+    fn mark(&self) -> (usize, usize, usize) {
+        (self.map.len(), self.breaks.len(), self.soft.len())
+    }
+
+    /// The end of the link read from `raw_line[range]`, the walk at `mark` when it started.  A
+    /// link whose text rendered blank shows its URL fallback instead, as the renderer does
+    /// (`renderer::util::link_fallback`): its chars map onto the destination's, where it shows
+    /// past the `](`, else all onto the link's first char (an escaped or reference destination).
+    /// The breaks in its text render nothing, but each still ends its line, so each stays as an
+    /// entry with no char, before the fallback: the renderer shows the fallback on the link's last
+    /// line, where its destination is, when its lines are rows of their own
+    /// (`renderer::split_at_breaks`).
+    fn end_link(
+        &mut self,
+        raw_line: &str,
+        mark: (usize, usize, usize),
+        url: &str,
+        range: std::ops::Range<usize>,
+    ) {
+        let (map_len, breaks_len, soft_len) = mark;
+        if !self.map[map_len..]
+            .iter()
+            .all(|&(_, c)| c.is_none_or(char::is_whitespace))
+        {
+            return;
+        }
+        self.map.truncate(map_len);
+        self.map
+            .extend(self.breaks.drain(breaks_len..).map(|raw| (raw, None)));
+        self.soft.truncate(soft_len);
+        let fallback = link_fallback(url);
+        let raw = raw_line.get(range.clone()).unwrap_or("");
+        let dest = raw.find("](").map(|open| open + 2);
+        match dest.and_then(|d| raw[d..].find(fallback.as_str()).map(|at| d + at)) {
+            Some(at) => {
+                self.push_chars(&fallback, range.start + at);
+            }
+            None => {
+                let first = self.lookup(range.start);
+                self.map.extend(fallback.chars().map(|c| (first, Some(c))));
+            }
         }
     }
 
@@ -267,7 +392,7 @@ impl CharMapWalk {
 
     fn push_chars(&mut self, text: &str, mut byte: usize) -> usize {
         for c in text.chars() {
-            self.map.push(self.lookup(byte));
+            self.map.push((self.lookup(byte), Some(c)));
             byte += c.len_utf8();
         }
         byte
@@ -298,7 +423,7 @@ impl CharMapWalk {
                 '–' if rest.starts_with("--") => 2,
                 _ => rest.chars().next().map_or(0, char::len_utf8),
             };
-            self.map.push(self.lookup(range.start + at));
+            self.map.push((self.lookup(range.start + at), Some(ch)));
             at += run;
         }
     }
@@ -329,15 +454,14 @@ impl CharMapWalk {
         self.push_chars(delim, range.end.saturating_sub(delim.len()));
     }
 
-    fn push_break(&mut self, byte: usize) {
+    /// A break, rendered as a space unless [`InlineColMap::from_walk`] drops a `soft` one.
+    fn push_break(&mut self, byte: usize, soft: bool) {
         let raw = self.lookup(byte);
-        self.map.push(raw);
+        self.map.push((raw, Some(' ')));
         self.breaks.push(raw);
-    }
-
-    fn finish(mut self) -> Vec<usize> {
-        self.map.push(self.total_chars);
-        self.map
+        if soft {
+            self.soft.push(raw);
+        }
     }
 }
 
@@ -359,7 +483,7 @@ fn highlight_marks(raw: &str) -> Vec<usize> {
 // ── Footnote-reference collapse ───────────────────────────────────────────────
 
 /// Collapse every literal `[^label]` in `raw_line` down to the renderer's `[label]` marker, in
-/// place on the forward map.
+/// place on the walk's rendered chars.
 ///
 /// The literal form maps 1:1 and the renderer emits the same characters *minus the `^`*, so simply
 /// dropping the `^`'s entry leaves every survivor pointing at the correct raw char and shrinks the
@@ -371,13 +495,13 @@ fn highlight_marks(raw: &str) -> Vec<usize> {
 fn collapse_footnote_refs(
     raw_line: &str,
     labels: Option<&RefLabels>,
-    rendered_to_raw: &mut Vec<usize>,
+    entries: &mut Vec<(usize, Option<char>)>,
 ) {
     let dropped = footnote_collapse_char_indices(raw_line, labels);
     if dropped.is_empty() {
         return;
     }
-    rendered_to_raw.retain(|&raw_char| !dropped.contains(&raw_char));
+    entries.retain(|(raw_char, _)| !dropped.contains(raw_char));
 }
 
 /// Char indices the renderer's marker drops, for every `[^label]` on `raw_line`: each `^`, plus
@@ -462,6 +586,31 @@ mod tests {
         let map = InlineColMap::build_inline("see [it][ref one] now", &labels);
         assert_eq!(map.rendered_to_raw(4), 5, "the `i` past the `[`");
         assert_eq!(map.rendered_to_raw(7), 18, "the `n` past the label");
+    }
+
+    /// A soft break between two CJK glyphs renders as nothing (issue #79), so it has no rendered
+    /// char: it is reported as vanished, before the char after it, and its raw newline maps to
+    /// that char.  Beside Latin text it is a space, as is a hard break.
+    #[test]
+    fn a_soft_break_between_cjk_glyphs_vanishes_from_the_map() {
+        let labels = RefLabels::default();
+        let map = InlineColMap::build_inline("日本\n*語*\nabc", &labels);
+        // 日 本 語 ␠ a b c: the break after `本` vanishes, the one after `語` stays.
+        assert_eq!(map.rendered_len(), 7);
+        assert_eq!(map.vanished_breaks(), [(2, 2)]);
+        assert_eq!(map.rendered_to_raw(2), 4, "`語` past its `*`");
+        assert!(map.is_break(3) && !map.is_break(2));
+        assert_eq!(
+            map.raw_to_rendered(2),
+            2,
+            "the vanished newline maps to `語`"
+        );
+
+        let map = InlineColMap::build_inline("日本\\\n語", &labels);
+        assert_eq!(map.rendered_len(), 4, "a hard break stays");
+        assert!(map.vanished_breaks().is_empty());
+        let map = InlineColMap::build_inline("한국\n어", &labels);
+        assert_eq!(map.rendered_len(), 4, "Hangul keeps its space");
     }
 
     #[test]
@@ -625,6 +774,48 @@ mod tests {
             &[1, 2, 3, 4, 5, 6, 7, 8, 9]
         );
         assert_eq!(map.rendered_to_raw_vec()[9], 22); // sentinel
+    }
+
+    /// A link with blank text renders its URL fallback (the URL, or a path's file name), so its
+    /// map does too, onto the destination's chars and not a title's.
+    #[test]
+    fn blank_link_text_maps_its_url_fallback() {
+        let map = InlineColMap::build("a [](u) b");
+        assert_eq!(map.rendered_len(), 5, "a ␠ u ␠ b");
+        assert_eq!(map.rendered_to_raw(2), 5, "`u` onto the destination");
+        let map = InlineColMap::build("[ ](./dir/plan.md \"plan.md\")");
+        assert_eq!(
+            map.rendered_len(),
+            7,
+            "the file name, the blank text dropped"
+        );
+        assert_eq!(
+            map.rendered_to_raw(0),
+            10,
+            "`p` of the destination's file name"
+        );
+        let map = InlineColMap::build("[](a\\_b)");
+        assert_eq!(
+            map.rendered_len(),
+            3,
+            "an escaped destination renders unescaped"
+        );
+        assert!(
+            (0..3).all(|k| map.rendered_to_raw(k) == 0),
+            "onto the link's `[`"
+        );
+    }
+
+    /// The breaks in a link that shows its URL fallback render nothing, but each still ends its
+    /// line: reported as vanished, before the fallback, so a map of the lines can cut there.
+    #[test]
+    fn a_blank_links_breaks_vanish_before_its_fallback() {
+        // 日 本 ␠ h t t p s : / / x ␠ a b c; the link's own `\n` is raw char 4.
+        let map = InlineColMap::build("日本\n[\n](https://x)\nabc");
+        assert_eq!(map.rendered_len(), 16);
+        assert_eq!(map.vanished_breaks(), [(3, 4)]);
+        assert!(map.is_break(2) && map.is_break(12) && !map.is_break(3));
+        assert_eq!(map.rendered_to_raw(3), 7, "`h` onto the destination");
     }
 
     #[test]

@@ -7,6 +7,7 @@ pub mod parser;
 pub mod render_cache;
 pub mod renderer;
 pub mod row_origin;
+pub mod segment_break;
 pub mod table_layout;
 
 pub use ast::{heading_slug_text, inlines_to_plain, Block, Inline, LineSpan, SrcLines};
