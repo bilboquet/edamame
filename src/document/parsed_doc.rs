@@ -14,10 +14,11 @@ use crate::document::wrap::Indent;
 use crate::document::SourceMap;
 use crate::markdown::ast::to_u32;
 use crate::markdown::{
-    attach_nested_tui_columns_comments, heading_slug_text, parse_document,
-    promote_diagram_code_blocks, promote_display_math_paragraphs, promote_html_comments,
-    promote_image_paragraphs, reconstruct_broken_display_math, split_display_math_paragraphs,
-    Block, ImageRowOverride, RefLabels, RenderCache, Renderer, RowOrigin,
+    attach_nested_tui_columns_comments, attach_trailing_tui_columns_comments, heading_slug_text,
+    parse_document, promote_diagram_code_blocks, promote_display_math_paragraphs,
+    promote_html_comments, promote_image_paragraphs, reconstruct_broken_display_math,
+    split_display_math_paragraphs, Block, ImageRowOverride, RefLabels, RenderCache, Renderer,
+    RowOrigin,
 };
 
 /// Metadata for one `Block::ImageBlock`, for the image loader and placeholder.
@@ -103,8 +104,10 @@ pub struct ParsedDoc {
     source_lines: OnceCell<Vec<Option<usize>>>,
     /// Lazy per-row column data (the row's chars, its block's position, its raw ↔ rendered
     /// column map), 1:1 with [`lines`](Self::lines), built by `row_map` from this parse's own
-    /// text on first use.
-    row_cache: Vec<OnceCell<RowCache>>,
+    /// text on first use.  Boxed so the vector — allocated, zeroed and dropped on every reparse,
+    /// though only the rows the cursor or a click visits are ever filled — costs a pointer per
+    /// row rather than a whole `RowCache`.
+    row_cache: Vec<OnceCell<Box<RowCache>>>,
     /// Lazy joined column maps of the paragraphs whose rows `row_map` maps as parts of the
     /// whole, keyed by `(block, paragraph's first line)`.  See [`with_joined_map`](Self::with_joined_map).
     joined_maps: RefCell<HashMap<(usize, u32), JoinedMap>>,
@@ -204,7 +207,7 @@ impl ParsedDoc {
         // `Block::Table`, so it must run against the promoted variant.  Order and count
         // are preserved, so `real_ranges` stays 1:1.
         promote_html_comments(&mut blocks);
-        merge_trailing_tui_columns_comments(&mut blocks, &mut real_ranges);
+        attach_trailing_tui_columns_comments(&mut blocks, Some(&mut real_ranges));
         attach_nested_tui_columns_comments(&mut blocks);
         // Image-only paragraphs become `Block::ImageBlock` so the renderer reserves
         // multi-row space for the graphics overlay.  In place, so alignment stays 1:1.
@@ -629,7 +632,7 @@ impl ParsedDoc {
         if let Some(cache) = cell.get() {
             return Some(cache);
         }
-        let cache = init()?;
+        let cache = Box::new(init()?);
         Some(cell.get_or_init(|| cache))
     }
 
@@ -829,44 +832,6 @@ fn set_table_widths_at(
             user_widths, src, ..
         } if src.first == line => *user_widths = Some(widths.to_vec()),
         _ => {}
-    }
-}
-
-/// Merge trailing `<!-- tui-columns: [..] -->` blocks into their preceding tables,
-/// rewriting `real_ranges` so the (block, range) pairing stays 1:1.  Mirrors
-/// `markdown::parser::attach_trailing_tui_columns_comments`, which does not.
-fn merge_trailing_tui_columns_comments(
-    blocks: &mut Vec<crate::markdown::ast::Block>,
-    real_ranges: &mut Vec<Range<usize>>,
-) {
-    use crate::markdown::ast::Block;
-    let mut i = 0;
-    while i + 1 < blocks.len() {
-        let is_pair = matches!(
-            (&blocks[i], &blocks[i + 1]),
-            (Block::Table { user_widths: None, .. }, Block::HtmlComment(body, _))
-                if crate::markdown::table_layout::parse_column_widths_comment(body).is_some()
-        );
-        if is_pair {
-            let body = match &blocks[i + 1] {
-                Block::HtmlComment(s, _) => s.clone(),
-                _ => unreachable!(),
-            };
-            let widths = crate::markdown::table_layout::parse_column_widths_comment(&body).unwrap();
-            if let Block::Table { user_widths, .. } = &mut blocks[i] {
-                *user_widths = Some(widths);
-            }
-            blocks.remove(i + 1);
-            // The table's extended range already ends at the next block's start, so
-            // dropping the comment's range lets the covering-ranges pass fill the gap.
-            if i + 1 < real_ranges.len() {
-                let absorbed_end = real_ranges[i + 1].end;
-                real_ranges[i] = real_ranges[i].start..absorbed_end;
-                real_ranges.remove(i + 1);
-            }
-            continue;
-        }
-        i += 1;
     }
 }
 
@@ -1777,6 +1742,37 @@ mod tests {
             "comment should have been absorbed: {:?}",
             doc.blocks
         );
+    }
+
+    /// Every table in a run takes its own comment, a second comment after a table stays a
+    /// block of its own, and the ranges stay 1:1 with the blocks, each table's taking in its
+    /// comment's.
+    #[test]
+    fn tui_columns_merge_keeps_ranges_paired_across_many_tables() {
+        let table = "| a | b |\n|---|---|\n| 1 | 2 |\n";
+        let comment = "<!-- tui-columns: [10, 20] -->\n";
+        let src = format!("{table}{comment}\n{table}{comment}{comment}\n{table}\npara\n");
+        let doc = ParsedDoc::build(&src, theme(), true, 24);
+        let kinds: Vec<&str> = doc
+            .blocks
+            .iter()
+            .map(|b| match b {
+                Block::Table {
+                    user_widths: Some(_),
+                    ..
+                } => "sized",
+                Block::Table { .. } => "table",
+                Block::HtmlComment(..) => "comment",
+                Block::Paragraph { .. } => "para",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, ["sized", "sized", "comment", "table", "para"]);
+        assert_eq!(doc.real_ranges.len(), doc.blocks.len());
+        assert!(doc.real_ranges.windows(2).all(|w| w[0].end <= w[1].start));
+        // The first table's range runs through its comment.
+        let first_comment_end = table.len() + comment.len();
+        assert!(doc.real_ranges[0].end >= first_comment_end - 1);
     }
 
     /// A widths comment after a table in a list item reaches the editor pipeline too: the

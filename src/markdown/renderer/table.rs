@@ -6,8 +6,8 @@ use ratatui::text::{Line, Span};
 
 use crate::markdown::ast::{to_u32, Inline, SrcLines};
 use crate::markdown::renderer::util::{
-    extend_with_styled_chars, link_fallback, styled_cells, truncate_to_width, wrap_styled_chars,
-    StyledChar,
+    extend_with_styled_chars, link_fallback, spaces, styled_cells, truncate_to_width,
+    wrap_styled_chars, StyledChar,
 };
 use crate::markdown::renderer::Renderer;
 use crate::markdown::row_origin::{ContentKind, RowOrigin, RowSink};
@@ -265,7 +265,7 @@ impl<'t> Renderer<'t> {
         spans.push(Span::styled("│", outer_border));
         for i in 0..col_count {
             let width = widths.get(i).copied().unwrap_or(MIN_COL_WIDTH);
-            spans.push(Span::styled(" ".repeat(width + 2), cell_style));
+            spans.push(Span::styled(spaces(width + 2), cell_style));
             let is_last = i + 1 == col_count;
             spans.push(Span::styled(
                 "│",
@@ -323,7 +323,7 @@ impl<'t> Renderer<'t> {
                 if row_w <= width {
                     extend_with_styled_chars(&mut spans, row);
                     let pad = width.saturating_sub(row_w);
-                    spans.push(Span::styled(format!("{} ", " ".repeat(pad)), default_style));
+                    spans.push(Span::styled(spaces(pad + 1), default_style));
                 } else {
                     let plain: String = row.iter().map(|c| c.ch).collect();
                     let truncated = truncate_to_width(&plain, width.saturating_sub(1));

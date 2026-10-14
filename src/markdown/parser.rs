@@ -10,7 +10,7 @@ pub use post_pass::{
 
 use std::ops::Range;
 
-use pulldown_cmark::{CodeBlockKind, Event, MetadataBlockKind, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, CowStr, Event, MetadataBlockKind, Tag, TagEnd};
 
 use super::ast::{inlines_to_plain, Block, Inline, LineSpan, ListItem, MetadataKind, SrcLines};
 use super::parse_offsets;
@@ -32,7 +32,7 @@ pub fn parse(text: &str) -> Vec<Block> {
     // variant; keeping the two passes separate is what lets an isolated
     // `<!-- tui-columns -->` outside any table survive as a hidden comment.
     promote_html_comments(&mut blocks);
-    attach_trailing_tui_columns_comments(&mut blocks);
+    attach_trailing_tui_columns_comments(&mut blocks, None);
     attach_nested_tui_columns_comments(&mut blocks);
     promote_image_paragraphs(&mut blocks, None);
     blocks
@@ -108,7 +108,19 @@ where
     I: Iterator<Item = (Event<'a>, Range<usize>)>,
 {
     let mut blocks = Vec::new();
+    parse_blocks_into(events, top_level, &mut blocks);
+    blocks
+}
 
+/// [`parse_blocks`], appending to `blocks`: a loose list item parses the rest of its blocks
+/// straight after its first paragraph, without a second vector to copy them out of.
+fn parse_blocks_into<'a, I>(
+    events: &mut EventStream<'a, I>,
+    top_level: bool,
+    blocks: &mut Vec<Block>,
+) where
+    I: Iterator<Item = (Event<'a>, Range<usize>)>,
+{
     loop {
         if top_level {
             events.set_base();
@@ -189,8 +201,6 @@ where
             }
         }
     }
-
-    blocks
 }
 
 /// Consume `Start(Paragraph) … End(Paragraph)`.  An empty paragraph collapses to `None`
@@ -469,7 +479,7 @@ where
                     if !inlines.is_empty() {
                         blocks.push(paragraph(events, inlines, src));
                     }
-                    blocks.extend(parse_blocks(events, false));
+                    parse_blocks_into(events, false, &mut blocks);
                 } else {
                     blocks = parse_blocks(events, false);
                 }
@@ -511,13 +521,13 @@ where
             None | Some(Event::End(TagEnd::Table)) => break,
             Some(Event::Start(Tag::TableHead)) => {
                 events.next();
-                headers = parse_table_row(events);
+                headers = parse_table_row(events, 0);
                 col_count = headers.len();
                 consume_end(events); // End(TableHead)
             }
             Some(Event::Start(Tag::TableRow)) => {
                 events.next();
-                let row = parse_table_row(events);
+                let row = parse_table_row(events, col_count);
                 consume_end(events); // End(TableRow)
                 rows.push(row);
             }
@@ -530,11 +540,12 @@ where
     (headers, rows, col_count)
 }
 
-fn parse_table_row<'a, I>(events: &mut EventStream<'a, I>) -> Vec<Vec<Inline>>
+/// One row's cells; `col_count` (the header's, or 0 before it is known) sizes the vector.
+fn parse_table_row<'a, I>(events: &mut EventStream<'a, I>, col_count: usize) -> Vec<Vec<Inline>>
 where
     I: Iterator<Item = (Event<'a>, Range<usize>)>,
 {
-    let mut cells = Vec::new();
+    let mut cells = Vec::with_capacity(col_count);
 
     loop {
         match events.peek() {
@@ -557,36 +568,38 @@ where
 }
 // ─── Highlight post-processing ────────────────────────────────────────────────
 
-/// Split a text string into `Inline`s, detecting `==highlight==` spans — pulldown-cmark
+/// Push a `Text` event's `Inline`s onto `out`, detecting `==highlight==` spans — pulldown-cmark
 /// has no native support for them, so each `Text` event is post-processed here.
-fn parse_highlight_in_text(text: &str) -> Vec<Inline> {
-    let mut result = Vec::new();
-    let mut rest = text;
-
-    loop {
-        match rest.find("==") {
-            None => break,
-            Some(start) => {
-                let after_open = &rest[start + 2..];
-                match after_open.find("==") {
-                    None => break, // unclosed marker — treat the rest as plain text
-                    Some(rel_end) => {
-                        if start > 0 {
-                            result.push(Inline::Text(rest[..start].to_owned()));
-                        }
-                        let inner = &after_open[..rel_end];
-                        result.push(Inline::Highlight(vec![Inline::Text(inner.to_owned())]));
-                        rest = &after_open[rel_end + 2..];
-                    }
-                }
-            }
+///
+/// Runs once per `Text` event of every reparse, so the common case — no `=` at all — is one
+/// `memchr` and a move of the event's own buffer, with no searcher set up and nothing copied.
+fn push_text_with_highlights(text: CowStr<'_>, out: &mut Vec<Inline>) {
+    if memchr::memchr(b'=', text.as_bytes()).is_none() {
+        if !text.is_empty() {
+            out.push(Inline::Text(text.into_string()));
         }
+        return;
+    }
+
+    let finder = memchr::memmem::Finder::new("==");
+    let mut rest: &str = &text;
+    while let Some(start) = finder.find(rest.as_bytes()) {
+        let after_open = &rest[start + 2..];
+        // An unclosed marker: the rest is plain text.
+        let Some(rel_end) = finder.find(after_open.as_bytes()) else {
+            break;
+        };
+        if start > 0 {
+            out.push(Inline::Text(rest[..start].to_owned()));
+        }
+        let inner = &after_open[..rel_end];
+        out.push(Inline::Highlight(vec![Inline::Text(inner.to_owned())]));
+        rest = &after_open[rel_end + 2..];
     }
 
     if !rest.is_empty() {
-        result.push(Inline::Text(rest.to_owned()));
+        out.push(Inline::Text(rest.to_owned()));
     }
-    result
 }
 
 // ─── Inline parsing ───────────────────────────────────────────────────────────
@@ -613,7 +626,7 @@ where
         };
 
         match event {
-            Event::Text(text) => inlines.extend(parse_highlight_in_text(&text)),
+            Event::Text(text) => push_text_with_highlights(text, &mut inlines),
             Event::Code(code) => inlines.push(Inline::Code(code.into_string())),
             Event::SoftBreak => inlines.push(Inline::SoftBreak),
             Event::HardBreak => inlines.push(Inline::HardBreak),

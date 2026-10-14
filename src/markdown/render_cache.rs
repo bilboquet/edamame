@@ -9,8 +9,9 @@
 //! `Block::ImageBlock` is never cached — its row count depends on the image decode cache,
 //! which changes out-of-band as decodes complete, and re-rendering a placeholder is free.
 
-use std::collections::HashMap;
+use std::hash::BuildHasher;
 
+use hashbrown::HashTable;
 use ratatui::text::Line;
 use rustc_hash::FxBuildHasher;
 
@@ -25,7 +26,69 @@ use super::row_origin::RowOrigin;
 /// struct keys and measurably faster here; the AST keying — hence correctness — is unchanged.
 /// (seahash, the crate's other non-crypto hasher, is for whole byte buffers and benched *slower*
 /// than SipHash on these keys.)
-pub(super) type BlockMap = HashMap<Block, CachedRows, FxBuildHasher>;
+///
+/// A `hashbrown::HashTable` rather than a `HashMap` so a block is hashed once per build: the
+/// caller computes [`BlockMap::hash`] and passes it to every probe and insert, where a
+/// `HashMap` hit (`remove_entry` from the previous build, `insert` into this one) hashed twice.
+#[derive(Debug, Default)]
+pub(super) struct BlockMap {
+    table: HashTable<(u64, Block, CachedRows)>,
+}
+
+impl BlockMap {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            table: HashTable::with_capacity(capacity),
+        }
+    }
+
+    /// `block`'s hash, for the `*_hashed` calls.
+    pub fn hash(block: &Block) -> u64 {
+        FxBuildHasher.hash_one(block)
+    }
+
+    /// Remove and return `block`'s entry, `hash` being [`Self::hash`] of it.
+    pub fn take(&mut self, hash: u64, block: &Block) -> Option<(Block, CachedRows)> {
+        self.table
+            .find_entry(hash, |(_, key, _)| key == block)
+            .ok()
+            .map(|entry| {
+                let ((_, key, rows), _) = entry.remove();
+                (key, rows)
+            })
+    }
+
+    pub fn get(&self, hash: u64, block: &Block) -> Option<&CachedRows> {
+        self.table
+            .find(hash, |(_, key, _)| key == block)
+            .map(|(_, _, rows)| rows)
+    }
+
+    /// Insert an entry for a block known to be absent: every caller has just probed for it.
+    pub fn insert_new(&mut self, hash: u64, block: Block, rows: CachedRows) {
+        debug_assert!(self.get(hash, &block).is_none());
+        self.table
+            .insert_unique(hash, (hash, block, rows), |(hash, _, _)| *hash);
+    }
+
+    pub fn len(&self) -> usize {
+        self.table.len()
+    }
+
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.table.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.table.clear();
+    }
+
+    #[cfg(test)]
+    pub fn keys(&self) -> impl Iterator<Item = &Block> {
+        self.table.iter().map(|(_, key, _)| key)
+    }
+}
 
 /// One block's memoized rows: its rendered lines and their origins, in lockstep.
 #[derive(Debug, Clone)]
@@ -84,6 +147,9 @@ pub(super) struct RenderSettings {
 pub struct RenderCache {
     pub(super) settings: Option<RenderSettings>,
     pub(super) entries: BlockMap,
+    /// Rows the last build rendered: the next build, which mostly repeats it, sizes its
+    /// [`RowSink`](super::row_origin::RowSink) from this instead of growing it by doubling.
+    pub(super) last_row_count: usize,
 }
 
 impl RenderCache {
@@ -98,10 +164,7 @@ impl RenderCache {
         // Sized for the last build's blocks, which this one mostly repeats: growing from empty
         // would rehash — and so re-hash every `Block` key — at each doubling.
         let capacity = self.entries.len();
-        std::mem::replace(
-            &mut self.entries,
-            BlockMap::with_capacity_and_hasher(capacity, FxBuildHasher),
-        )
+        std::mem::replace(&mut self.entries, BlockMap::with_capacity(capacity))
     }
 }
 
@@ -134,10 +197,12 @@ mod tests {
         ] {
             let mut cache = RenderCache::default();
             cache.begin_build(settings());
-            cache.entries.insert(
-                Block::HorizontalRule {
-                    src: Default::default(),
-                },
+            let block = Block::HorizontalRule {
+                src: Default::default(),
+            };
+            cache.entries.insert_new(
+                BlockMap::hash(&block),
+                block,
                 CachedRows {
                     lines: vec![Line::from("x")],
                     origins: vec![RowOrigin::chrome(None)],

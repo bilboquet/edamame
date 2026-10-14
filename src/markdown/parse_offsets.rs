@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use pulldown_cmark::{Event, Options, Parser, RefDefs, Tag, TagEnd};
+use pulldown_cmark::{Event, OffsetIter, Options, Parser, RefDefs, Tag, TagEnd};
 
 /// The block-level constructs [`block_ranges_by`] understands.  Maps both
 /// `pulldown_cmark::Tag` and `TagEnd` into one enum so the scanner can pair starts and ends
@@ -122,21 +122,45 @@ impl<'a> DocParser<'a> {
     }
 
     /// Every event with its byte range in the document.
-    pub fn into_offset_iter(self) -> impl Iterator<Item = (Event<'a>, Range<usize>)> {
-        let shift = self.body_start;
-        self.head
-            .into_iter()
-            .flat_map(Parser::into_offset_iter)
-            .chain(
-                self.body
-                    .into_offset_iter()
-                    .map(move |(event, range)| (event, range.start + shift..range.end + shift)),
-            )
+    pub fn into_offset_iter(self) -> DocOffsetIter<'a> {
+        DocOffsetIter {
+            head: self.head.map(Parser::into_offset_iter),
+            body: self.body.into_offset_iter(),
+            shift: self.body_start,
+        }
     }
 
     /// Every event, without ranges.
     pub(crate) fn into_events(self) -> impl Iterator<Item = Event<'a>> {
         self.head.into_iter().flatten().chain(self.body)
+    }
+}
+
+/// [`DocParser::into_offset_iter`]'s iterator: the frontmatter's events, then the body's with
+/// their ranges shifted to document offsets.
+///
+/// Hand-written rather than `flat_map(..).chain(..map(..))`: this is the parse's innermost loop,
+/// every event of every reparse passes through it, and the adapter stack did not inline into
+/// the parser's consumers — it showed as several percent of a parse-bound edit on its own.
+pub struct DocOffsetIter<'a> {
+    head: Option<OffsetIter<'a>>,
+    body: OffsetIter<'a>,
+    shift: usize,
+}
+
+impl<'a> Iterator for DocOffsetIter<'a> {
+    type Item = (Event<'a>, Range<usize>);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(head) = &mut self.head {
+            match head.next() {
+                Some(item) => return Some(item),
+                None => self.head = None,
+            }
+        }
+        let (event, range) = self.body.next()?;
+        Some((event, range.start + self.shift..range.end + self.shift))
     }
 }
 

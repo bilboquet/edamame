@@ -4,6 +4,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 
 use crate::markdown::ast::{to_u32, Block, ListItem};
+use crate::markdown::renderer::util::spaces;
 use crate::markdown::renderer::{
     paragraph_reflows, paragraph_row_inlines, paragraph_rows, push_gap_rows, render_children,
     Renderer,
@@ -32,6 +33,8 @@ impl<'t> Renderer<'t> {
         let marker_width = if ordered { digit_width + 2 } else { 2 };
         let nested_indent_width = marker_width.max(4);
         let child_indent_prefix = format!("{indent_prefix}{}", " ".repeat(nested_indent_width));
+        // Measured once per list rather than per item: every item's marker starts with it.
+        let indent_prefix_cells = str_cells(indent_prefix);
 
         let mut counter = first_num;
         let mut prev_end: Option<u32> = None;
@@ -88,12 +91,19 @@ impl<'t> Renderer<'t> {
 
             // Blocks after the first indent to the item's text, behind the marker and any task box.
             // A nested list instead takes `child_indent_prefix`, the 4-space nesting.
-            let text_indent = " ".repeat(
+            // The cells before the item's text — marker and task box — counted rather than
+            // measured: the marker is the indent prefix and `marker_width` cells (`• `, or the
+            // number right-aligned in its slot and `. `), the task box four (`[✓] `).
+            let prefix_cells =
+                indent_prefix_cells + marker_width + if item.task.is_some() { 4 } else { 0 };
+            debug_assert_eq!(
+                prefix_cells,
                 str_cells(&marker) + task_prefix.as_ref().map_or(0, |tp| str_cells(&tp.content)),
             );
+            let text_indent = spaces(prefix_cells);
             let render_nested = |block: &Block, out: &mut RowSink| match block {
                 Block::List { .. } => self.render_block(block, out, &child_indent_prefix, false),
-                _ if renders_flush(block) => self.render_under_indent(block, &text_indent, out),
+                _ if renders_flush(block) => self.render_under_indent(block, prefix_cells, out),
                 _ => self.render_block(block, out, &text_indent, false),
             };
 
@@ -123,9 +133,6 @@ impl<'t> Renderer<'t> {
                             }
                             // Marker and task box are prefix; the text's later rows sit under
                             // its first, behind the same width of indent.
-                            let prefix_cells: usize =
-                                spans.iter().map(|s| str_cells(&s.content)).sum();
-                            let continuation = " ".repeat(prefix_cells);
                             // Reflowed as one flow, or one row per source line, like the
                             // item's later paragraphs (see `render_paragraph`).
                             let join = paragraph_reflows(self.reflow_paragraphs, inlines);
@@ -144,7 +151,7 @@ impl<'t> Renderer<'t> {
                                 {
                                     // Only a trailing segment with nothing to show is
                                     // suppressed, as in `render_paragraph`.
-                                    let mut row = vec![Span::raw(continuation.clone())];
+                                    let mut row = vec![Span::raw(text_indent.clone())];
                                     row.extend(rendered);
                                     out.push(Line::from(row), origin);
                                 }
@@ -168,12 +175,11 @@ impl<'t> Renderer<'t> {
     }
 
     /// Render `block`, which draws no indent of its own, under an item's text: inset by
-    /// `indent`'s cells, each row behind it, as a quote's children sit behind its bar
+    /// `cells`, each row behind that many spaces, as a quote's children sit behind its bar
     /// (`render_blockquote`).  A row keeps its line style, so a surface (a quote's wash, a code
     /// block's) still fills its trailing cells; the indent gets the background around the item
     /// instead ([`Renderer::surface_bg`]), so the surface starts where the block does.
-    fn render_under_indent(&self, block: &Block, indent: &str, out: &mut RowSink) {
-        let cells = str_cells(indent);
+    fn render_under_indent(&self, block: &Block, cells: usize, out: &mut RowSink) {
         let mut inner = RowSink::default();
         self.inset_by(cells, || self.render_block(block, &mut inner, "", false));
         for (line, origin) in inner.into_rows() {
@@ -181,8 +187,10 @@ impl<'t> Renderer<'t> {
                 Some(_) => Style::default().bg(self.surface_bg()),
                 None => Style::default(),
             };
-            let mut spans = vec![Span::styled(indent.to_owned(), indent_style)];
-            spans.extend(line.spans);
+            // Into the row's own span vector: no copy of its spans, and no allocation for the
+            // indent, which borrows from a static run of spaces.
+            let mut spans = line.spans;
+            spans.insert(0, Span::styled(spaces(cells), indent_style));
             out.push(Line::from(spans).style(line.style), origin.shifted(cells));
         }
     }

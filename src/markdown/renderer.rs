@@ -14,10 +14,10 @@ use tui_big_text::{BigText, PixelSize};
 
 use crate::config::Theme;
 
-use self::util::{link_fallback, link_style_for};
+use self::util::{link_fallback, link_style_for, nbsps, spaces};
 use super::ast::{inlines_to_plain, to_u32, Block, Inline, LineSpan, MetadataKind, SrcLines};
 use super::highlight::{self, Token};
-use super::render_cache::{is_cache_worthy, CachedRows, RenderCache, RenderSettings};
+use super::render_cache::{is_cache_worthy, BlockMap, CachedRows, RenderCache, RenderSettings};
 use super::row_origin::{ContentKind, RowOrigin, RowSink};
 use super::segment_break;
 use super::table_layout::{self, str_cells};
@@ -221,7 +221,7 @@ impl<'t> Renderer<'t> {
             },
         });
 
-        let mut rows = RowSink::default();
+        let mut rows = RowSink::with_capacity(cache.last_row_count);
         let mut counts = Vec::with_capacity(blocks.len());
         for block in blocks {
             let before = rows.len();
@@ -231,27 +231,33 @@ impl<'t> Renderer<'t> {
             // re-rendering them (#35 §2, `is_cache_worthy`).
             if matches!(block, Block::ImageBlock { .. }) || !is_cache_worthy(block) {
                 self.render_block(block, &mut rows, "", true);
-            } else if let Some((key, hit)) = prev.remove_entry(block) {
-                // The common hit, so it is asked first: each `Block` hash walks a deep value.
-                rows.extend_from(&hit.lines, &hit.origins);
-                cache.entries.insert(key, hit);
-            } else if let Some(hit) = cache.entries.get(block) {
-                // A block repeated earlier in this build, already moved over.
-                rows.extend_from(&hit.lines, &hit.origins);
             } else {
-                self.render_block(block, &mut rows, "", true);
-                // Origins are block-relative, so a cached block's rows hold wherever it moves.
-                cache.entries.insert(
-                    block.clone(),
-                    CachedRows {
-                        lines: rows.lines[before..].to_vec(),
-                        origins: rows.origins[before..].to_vec(),
-                    },
-                );
+                // One hash per block per build: each `Block` hash walks a deep value.
+                let hash = BlockMap::hash(block);
+                if let Some(hit) = cache.entries.get(hash, block) {
+                    // A block repeated earlier in this build, already moved over.
+                    rows.extend_from(&hit.lines, &hit.origins);
+                } else if let Some((key, hit)) = prev.take(hash, block) {
+                    rows.extend_from(&hit.lines, &hit.origins);
+                    cache.entries.insert_new(hash, key, hit);
+                } else {
+                    self.render_block(block, &mut rows, "", true);
+                    // Origins are block-relative, so a cached block's rows hold wherever it
+                    // moves.
+                    cache.entries.insert_new(
+                        hash,
+                        block.clone(),
+                        CachedRows {
+                            lines: rows.lines[before..].to_vec(),
+                            origins: rows.origins[before..].to_vec(),
+                        },
+                    );
+                }
             }
             counts.push(rows.len() - before);
         }
 
+        cache.last_row_count = rows.len();
         // `prev` drops here, evicting entries whose block is gone.
         (rows, counts)
     }
@@ -480,7 +486,7 @@ impl<'t> Renderer<'t> {
                 self.render_block(b, body, "", false);
             });
         });
-        let cont_indent = " ".repeat(shift);
+        let cont_indent = spaces(shift);
         let back = " ↩";
 
         if body.is_empty() {
@@ -742,7 +748,13 @@ impl<'t> Renderer<'t> {
         indent_prefix: &str,
     ) {
         let reflow = paragraph_reflows(self.reflow_paragraphs, inlines);
-        let prefix = indent_prefix.to_string();
+        // Cloned onto every row: borrowed from the static run when it is only spaces (a list
+        // item's indent, the usual case), so the clones allocate nothing.
+        let prefix = if indent_prefix.bytes().all(|b| b == b' ') {
+            spaces(indent_prefix.len())
+        } else {
+            Cow::Owned(indent_prefix.to_owned())
+        };
         let inlines = paragraph_row_inlines(inlines, reflow);
         let mut rows =
             paragraph_rows(&inlines, src, reflow, to_u32(str_cells(indent_prefix))).peekable();
@@ -793,7 +805,7 @@ impl<'t> Renderer<'t> {
 
         let chars: Vec<char> = text.chars().collect();
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(tokens.len() * 2 + 2);
-        spans.push(Span::styled(" ".repeat(CODE_PAD_COLS), base));
+        spans.push(Span::styled(spaces(CODE_PAD_COLS), base));
 
         let run = |from: usize, to: usize| -> String { chars[from..to].iter().collect() };
         let mut col = 0usize;
@@ -817,7 +829,7 @@ impl<'t> Renderer<'t> {
 
         // Fill to the viewport edge, as the unhighlighted row above does.
         if fill > 0 {
-            spans.push(Span::styled(" ".repeat(fill), base));
+            spans.push(Span::styled(spaces(fill), base));
         }
         Line::from(spans).style(base)
     }
@@ -880,7 +892,7 @@ impl<'t> Renderer<'t> {
                     fence,
                 );
             } else {
-                let padded = "\u{00A0}".repeat(block_width);
+                let padded = nbsps(block_width);
                 out.push(Line::styled(padded, self.theme.code_block_text), fence);
             }
         }
@@ -906,7 +918,7 @@ impl<'t> Renderer<'t> {
                 if chars.is_empty() {
                     // NBSP, not spaces: ratatui's WordWrapper treats it as
                     // non-whitespace and so emits no extra blank line.
-                    let padded = "\u{00A0}".repeat(block_width);
+                    let padded = nbsps(block_width);
                     out.push(
                         Line::styled(padded, self.theme.code_block_text),
                         body_origin(i, 0),
@@ -934,7 +946,7 @@ impl<'t> Renderer<'t> {
             for (i, line) in raw_lines.iter().enumerate() {
                 if line.is_empty() {
                     // NBSP, as in the wrapped path above.
-                    let padded = "\u{00A0}".repeat(block_width);
+                    let padded = nbsps(block_width);
                     out.push(
                         Line::styled(padded, self.theme.code_block_text),
                         body_origin(i, 0),
@@ -951,7 +963,7 @@ impl<'t> Renderer<'t> {
         // fence — every fence while it is being typed — still gets one, which no source line
         // owns.
         if fenced {
-            let padded = "\u{00A0}".repeat(block_width);
+            let padded = nbsps(block_width);
             let k = body_first + raw_lines.len();
             let closing = (k < src.len()).then(|| line_at(src, k));
             out.push(
@@ -1404,9 +1416,27 @@ fn drop_vanishing(inlines: &[Inline], vanishing: &mut impl Iterator<Item = bool>
 }
 
 /// Whether a link with `text` renders its URL fallback ([`link_fallback`]) instead: its text
-/// renders blank.
+/// renders blank — [`inlines_to_plain`] of it trims to nothing.
+///
+/// Walked rather than built and trimmed: it is asked of every link on every render, and the
+/// plain text is blank exactly when every piece of it is (a soft break's space, or its removal
+/// between CJK glyphs, is blank either way).
 fn shows_fallback(text: &[Inline]) -> bool {
-    inlines_to_plain(text).trim().is_empty()
+    text.iter().all(|inline| match inline {
+        Inline::Text(t) | Inline::Html(t) | Inline::Code(t) => t.trim().is_empty(),
+        Inline::Image { alt, .. } => alt.trim().is_empty(),
+        Inline::Bold(inner)
+        | Inline::Italic(inner)
+        | Inline::Strikethrough(inner)
+        | Inline::Highlight(inner)
+        | Inline::Link { text: inner, .. } => shows_fallback(inner),
+        // Rendered with its `$` delimiters, never blank.
+        Inline::Math { .. } => false,
+        Inline::HtmlComment(_)
+        | Inline::FootnoteReference { .. }
+        | Inline::SoftBreak
+        | Inline::HardBreak => true,
+    })
 }
 
 /// `inlines` with every soft or hard break lifted to the top level: a container a break falls
@@ -1722,6 +1752,37 @@ mod tests {
     fn render(md: &str) -> Vec<Line<'static>> {
         let blocks = parse(md);
         renderer().render(&blocks)
+    }
+
+    /// The walk agrees with the definition it replaced: the link's plain text trims to nothing.
+    #[test]
+    fn shows_fallback_matches_blank_plain_text() {
+        let text = |s: &str| Inline::Text(s.into());
+        let cases: Vec<Vec<Inline>> = vec![
+            vec![],
+            vec![text("")],
+            vec![text("  \u{3000}")],
+            vec![text("a")],
+            vec![text(" "), Inline::SoftBreak, text(" ")],
+            vec![Inline::HardBreak],
+            vec![Inline::Bold(vec![text(" ")]), Inline::Italic(vec![])],
+            vec![Inline::Bold(vec![text(" x ")])],
+            vec![Inline::Code(" ".into())],
+            vec![Inline::Code("c".into())],
+            vec![Inline::Html("<b>".into())],
+            vec![Inline::HtmlComment("<!-- c -->".into())],
+            vec![Inline::Math {
+                source: String::new(),
+                display: false,
+            }],
+        ];
+        for inlines in cases {
+            assert_eq!(
+                shows_fallback(&inlines),
+                inlines_to_plain(&inlines).trim().is_empty(),
+                "{inlines:?}"
+            );
+        }
     }
 
     // ── Display math ─────────────────────────────────────────────────
