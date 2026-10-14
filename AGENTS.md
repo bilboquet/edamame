@@ -298,7 +298,8 @@ src/
 tests/              # diagrams, search, editing, footnotes, list_edit, mouse, palette,
                     #   renderer, row_provenance, source_map, table, ui; heading_anchors
                     #   (slugs vs. GitHub's, from fixtures/github_anchors.tsv); doc_links
-                    #   (every relative link in the repo's Markdown resolves);
+                    #   (every relative link in the repo's Markdown resolves); changelog
+                    #   (CHANGELOG.md's footer link block matches its version headings);
                     #   snapshots/ and fixtures/; support/markdown_gen.rs (shared
                     #   proptest document generator)
 

@@ -11,19 +11,19 @@ Each released version's section is also what ships as the GitHub release notes: 
 ### Changed
 
 - Paragraphs inside list items, blockquotes and footnotes now reflow to the window width like top-level paragraphs. With reflow off, every paragraph keeps your line breaks.
+- Tables, code blocks and other blocks inside a list item now line up under the item's text. Insert table on an empty item, or on the blank line below one, puts the table inside the item.
 - Blank `>` lines in a blockquote now show as empty quoted rows, as many as you wrote.
-- Tables, code blocks and other blocks inside a list item now line up under the item's text, and Insert table on an empty item or the blank line below one puts the table inside the item.
 
 ### Fixed
 
 - Heading links now use GitHub's anchors, so links to headings with non-Latin, accented or formatted text (`#日本語`, `#café`) work. A bare `#` link goes to the top of the document.
 - Tables inside list items, blockquotes and footnotes, and tables without edge pipes or with short rows, now work like any other table: one-cell editing, Tab, row and column commands, and the mouse handles.
+- A `$$` math block at the start of a list item, or in a file with Windows (CRLF) line endings, now renders as a formula instead of running its lines together as text.
+- HTML comments inside a list item, blockquote or footnote are now hidden, as they already were elsewhere.
+- Layout fixes, mostly in lists, blockquotes, footnotes, tables and wrapped text: clicks, cursor, highlights and line numbers landing in the wrong place; missing or extra blank rows; misaligned indentation.
 - CJK text now wraps between characters, keeps punctuation such as `。` and `「` with its text, and no longer adds blank rows in code blocks. A reflowed paragraph no longer shows a space where a Chinese or Japanese line was wrapped in the source.
-- Accented letters and Korean text stored in decomposed form, common in files from macOS, now display correctly, and cursor keys in text fields move over a whole emoji or accented letter.
-- In vim mode, motions and edits no longer stop inside or split an emoji or an accented letter, a decomposed accent no longer ends a word for motions, `diw`, `*` or a double-click, and `f`/`t` no longer match the plain letter under a decomposed accent.
-- Fixed various layout bugs, mostly in lists, blockquotes, footnotes, tables and wrapped text: misplaced clicks, cursor, highlights and line numbers; missing or extra blank rows; and misaligned indentation.
-- HTML comments inside a list item, quote or footnote are now hidden, as they already were elsewhere.
-- A `$$` math block at the start of a list item, or anywhere in a file with Windows (CRLF) line endings, now shows one line per row, as it does in a blockquote, instead of running its lines together.
+- Accented letters and Korean text stored in decomposed form, common in files from macOS, now display correctly.
+- An emoji or accented letter is now treated as one character: cursor keys in text fields, and vim motions and edits, no longer stop inside or split one. In vim mode, a decomposed accent no longer ends a word for motions, `diw`, `*` or double-click, and `f`/`t` no longer match the plain letter under it.
 - A `---` further down a file that starts with frontmatter is no longer mistaken for more frontmatter.
 - Pasting an image on the blank line after an indented code block or HTML block now works.
 - Dragging to select no longer switches lines between rendered and Markdown source mid-drag.
@@ -141,6 +141,10 @@ Each released version's section is also what ships as the GitHub release notes: 
 
 First public release.
 
-[Unreleased]: https://github.com/mijowi/edamame/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/mijowi/edamame/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/mijowi/edamame/compare/v0.1.4...v0.1.5
+[0.1.4]: https://github.com/mijowi/edamame/compare/v0.1.3...v0.1.4
+[0.1.3]: https://github.com/mijowi/edamame/compare/v0.1.2...v0.1.3
+[0.1.2]: https://github.com/mijowi/edamame/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/mijowi/edamame/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/mijowi/edamame/releases/tag/v0.1.0
