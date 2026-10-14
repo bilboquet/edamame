@@ -1100,12 +1100,81 @@ mod tests {
                 math_blocks[0].source
             );
         }
-        // Columns shaped like a formula pulldown-cmark parsed itself: only the first line's.
-        let src = "$$\nx^2 = z^{123\n$$\n";
-        let (mut blocks, ranges) = crate::markdown::parse_raw_with_ranges(src);
-        reconstruct_broken_display_math(&mut blocks, &ranges, src);
-        let (ok, _) = crate::markdown::parse_raw_with_ranges("$$\nx^2 = z^{123}\n$$\n");
-        assert_eq!(blocks[0].src(), ok[0].src());
+        // Columns shaped like a formula pulldown-cmark parsed itself: the `$$` line's and each
+        // body line's, CRLF or not, and none on the closing `$$`.  A one-line `$$…$$` has no body.
+        for (broken, balanced, cols) in [
+            (
+                "$$\nx^2 = z^{123\n$$\n",
+                "$$\nx^2 = z^{123}\n$$\n",
+                &[Some(0), Some(0), None][..],
+            ),
+            (
+                "$$\r\nx^2 = z^{123\r\ny\r\n$$\r\n",
+                "$$\r\nx^2 = z^{123}\r\ny\r\n$$\r\n",
+                &[Some(0), Some(0), Some(0), None],
+            ),
+            ("$$x^2 = z^{123$$\n", "$$x^2 = z^{123}$$\n", &[Some(0)]),
+        ] {
+            let (mut blocks, ranges) = crate::markdown::parse_raw_with_ranges(broken);
+            reconstruct_broken_display_math(&mut blocks, &ranges, broken);
+            let (ok, _) = crate::markdown::parse_raw_with_ranges(balanced);
+            assert_eq!(blocks[0].src(), ok[0].src(), "{broken:?}");
+            let got: Vec<_> = blocks[0].src().unwrap().cols().collect();
+            assert_eq!(got, cols, "{broken:?}");
+        }
+    }
+
+    /// A promoted `$$` block keeps the figures-off paragraph's columns, a column on each formula
+    /// line included, so a revealed body line maps by its own column, as the ` math ` block's
+    /// row does.
+    #[test]
+    fn a_promoted_math_block_keeps_its_formula_columns() {
+        let src = "$$\nx^2\ny^2\n$$\n";
+        let doc = ParsedDoc::build(src, theme(), true, 10);
+        assert!(
+            matches!(doc.blocks[0], Block::ImageBlock { .. }),
+            "{:?}",
+            doc.blocks
+        );
+        // `parse` promotes nothing: the paragraph the figures-off view renders.
+        let para = crate::markdown::parse(src);
+        assert!(matches!(para[0], Block::Paragraph { .. }), "{para:?}");
+        assert_eq!(doc.blocks[0].src(), para[0].src());
+        let cols: Vec<_> = doc.blocks[0].src().unwrap().cols().collect();
+        assert_eq!(cols, [Some(0), Some(0), Some(0), None]);
+    }
+
+    /// Stacked formulas parse as one paragraph, which isn't one ` math ` block and so records no
+    /// formula columns; each formula carved out of it, promoted or split, gets its own.
+    #[test]
+    fn each_stacked_formula_gets_its_formula_columns() {
+        let src = "$$\na\n$$\n$$\nb\nc\n$$\n";
+        let cols_of = |blocks: &[Block]| -> Vec<Vec<Option<u32>>> {
+            blocks
+                .iter()
+                .map(|b| b.src().unwrap().cols().collect())
+                .collect()
+        };
+        let expected = [
+            vec![Some(0), Some(0), None],
+            vec![Some(0), Some(0), Some(0), None],
+        ];
+        let (mut promoted, mut ranges) = crate::markdown::parse_raw_with_ranges(src);
+        promote_display_math_paragraphs(&mut promoted, &mut ranges, src);
+        assert!(
+            promoted
+                .iter()
+                .all(|b| matches!(b, Block::ImageBlock { .. })),
+            "{promoted:?}"
+        );
+        assert_eq!(cols_of(&promoted), expected);
+        let (mut split, mut ranges) = crate::markdown::parse_raw_with_ranges(src);
+        split_display_math_paragraphs(&mut split, &mut ranges, src);
+        assert!(
+            split.iter().all(|b| matches!(b, Block::Paragraph { .. })),
+            "{split:?}"
+        );
+        assert_eq!(cols_of(&split), expected);
     }
 
     /// A paragraph that merely mentions dollar signs — not a lone `$$...$$` block — must NOT be

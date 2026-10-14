@@ -4,11 +4,12 @@
 //! comments fold into preceding tables.  Every promotion carries the replaced block's
 //! [`SrcLines`] across.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
 
 use crate::diagram::DiagramSource;
-use crate::markdown::ast::{Block, Inline, SrcLines};
+use crate::markdown::ast::{to_u32, Block, Inline, SrcLines};
 
 /// Collapse a `Block::Paragraph` whose only substantive inline is an `Inline::Image` into
 /// a `Block::ImageBlock`.  `real_ranges` is untouched — the promotion removes no blocks;
@@ -117,14 +118,13 @@ pub fn reconstruct_broken_display_math(
             source: inner.to_string(),
             display: true,
         }];
-        // One formula is one atomic inline, recorded the way pulldown-cmark's own parse of it
-        // is: its later lines carry no column.
-        let cols: Vec<Option<u32>> = src
-            .cols()
-            .enumerate()
-            .map(|(k, col)| col.filter(|_| k == 0))
-            .collect();
-        *src = SrcLines::new(src.first, &cols);
+        // One formula is one atomic inline, its columns recorded by [`with_formula_cols`] as for
+        // a formula pulldown-cmark parsed itself.
+        let lines = range_lines(source, range);
+        let first = src.first as usize;
+        *src = with_formula_cols(src, formula_block_body(inner).as_deref(), |k| {
+            lines.get(first + k).copied().unwrap_or("")
+        });
     }
 }
 
@@ -175,7 +175,7 @@ pub fn promote_display_math_paragraphs(
             out.push(Block::ImageBlock {
                 alt: "math".to_string(),
                 url,
-                src: piece_src_lines(src, source, &range, &piece_ranges[i]),
+                src: piece_src_lines(src, source, &range, &piece_ranges[i], formula),
             });
             out_ranges.push(piece_ranges[i].clone());
         }
@@ -213,12 +213,14 @@ pub fn split_display_math_paragraphs(
             Some((formulas, piece_ranges)) => {
                 let para_src = block.src().cloned().unwrap_or_default();
                 for (i, formula) in formulas.into_iter().enumerate() {
+                    let src =
+                        piece_src_lines(&para_src, source, &range, &piece_ranges[i], &formula);
                     out.push(Block::Paragraph {
                         inlines: vec![Inline::Math {
                             source: formula,
                             display: true,
                         }],
-                        src: piece_src_lines(&para_src, source, &range, &piece_ranges[i]),
+                        src,
                     });
                     out_ranges.push(piece_ranges[i].clone());
                 }
@@ -233,14 +235,16 @@ pub fn split_display_math_paragraphs(
     *real_ranges = out_ranges;
 }
 
-/// The [`SrcLines`] of one formula carved out of a display-math paragraph: the paragraph's own,
+/// The [`SrcLines`] of `formula`, carved out of a display-math paragraph: the paragraph's own,
 /// cut to the lines `piece` covers and re-anchored at the piece's first line, which is where
-/// its new top-level range starts.
+/// its new top-level range starts, with [`with_formula_cols`] for the formula's body lines.  A
+/// paragraph of stacked formulas has none of its own, since it isn't one ` math ` block.
 fn piece_src_lines(
     para: &SrcLines,
     source: &str,
     para_range: &Range<usize>,
     piece: &Range<usize>,
+    formula: &str,
 ) -> SrcLines {
     let lines_between = |from: usize, to: usize| {
         source
@@ -262,7 +266,12 @@ fn piece_src_lines(
         .skip(skip)
         .take(len)
         .collect();
-    SrcLines::new(0, &cols)
+    let lines = range_lines(source, piece);
+    with_formula_cols(
+        &SrcLines::new(0, &cols),
+        formula_block_body(formula).as_deref(),
+        |k| lines.get(k).copied().unwrap_or(""),
+    )
 }
 
 /// If `inlines` contains only display-math inlines (plus soft/hard breaks
@@ -298,10 +307,15 @@ fn collect_display_math_only(inlines: &[Inline]) -> Option<Vec<String>> {
 ///
 /// The renderer records that shape's rows 1:1 with the source lines in their `RowOrigin`s, which
 /// is what the cursor and the click hit-test read.
-pub(crate) fn display_math_block_body(block: &Block) -> Option<String> {
+pub fn display_math_block_body(block: &Block) -> Option<Cow<'_, str>> {
     let Block::Paragraph { inlines, .. } = block else {
         return None;
     };
+    math_block_body(inlines)
+}
+
+/// [`display_math_block_body`] of a paragraph holding `inlines`.
+pub(crate) fn math_block_body(inlines: &[Inline]) -> Option<Cow<'_, str>> {
     let mut formula: Option<&str> = None;
     for inline in inlines {
         match inline {
@@ -315,11 +329,74 @@ pub(crate) fn display_math_block_body(block: &Block) -> Option<String> {
             _ => return None,
         }
     }
-    // Require `$$` on their own lines: the source then reads `\n…\n`, and
-    // stripping one newline each side leaves the body whose rendered fence
-    // rows line up 1:1 with the source's two `$$` lines.
-    let inner = formula?.strip_prefix('\n')?.strip_suffix('\n')?;
-    Some(inner.to_string())
+    formula_block_body(formula?)
+}
+
+/// The body of `formula`, one `$$` formula's source, if its `$$` are on lines of their own: the
+/// source then reads `\n…\n`, and stripping one newline each side leaves the body whose rendered
+/// fence rows line up 1:1 with the source's two `$$` lines.  pulldown-cmark keeps a CRLF file's
+/// `\r\n` in the formula; a `\r` is never content.  Borrowed unless there is one to drop: the
+/// renderer asks once per math paragraph per render.
+fn formula_block_body(formula: &str) -> Option<Cow<'_, str>> {
+    let inner = formula
+        .strip_prefix('\n')
+        .or_else(|| formula.strip_prefix("\r\n"))?;
+    let inner = inner
+        .strip_suffix("\r\n")
+        .or_else(|| inner.strip_suffix('\n'))?;
+    Some(if inner.contains('\r') {
+        Cow::Owned(inner.replace("\r\n", "\n"))
+    } else {
+        Cow::Borrowed(inner)
+    })
+}
+
+/// The source lines `range` covers, from the start of its first line, without their `\n`.
+fn range_lines<'s>(source: &'s str, range: &Range<usize>) -> Vec<&'s str> {
+    let line_start = source
+        .get(..range.start)
+        .and_then(|before| before.rfind('\n'))
+        .map_or(0, |i| i + 1);
+    source
+        .get(line_start..range.end)
+        .unwrap_or("")
+        .split('\n')
+        .collect()
+}
+
+/// The columns of `src`, a paragraph holding one `$$` formula: the opening line's, then, if the
+/// paragraph renders as a ` math ` block whose formula is `body` ([`display_math_block_body`]),
+/// each body line's: where the line's text starts, so the source line from there is the
+/// formula's line.  Every other line is an atomic inline's tail and has none.  `line_text(k)` is
+/// the paragraph's `k`th source line.
+///
+/// pulldown-cmark reports the formula as one atomic span, so the recorder gives its body lines no
+/// column, but each renders as a row of its own, and its prefix can be shorter than the opening
+/// line's: a lazy continuation line, or `>x` under `> $$`.  The formula is a slice of the source,
+/// so each line ends with its formula line; one that didn't (a guard, not a shape the parser
+/// produces) would keep none, and the renderer falls back to the opening line's.
+pub(crate) fn with_formula_cols<'s>(
+    src: &SrcLines,
+    body: Option<&str>,
+    line_text: impl Fn(usize) -> &'s str,
+) -> SrcLines {
+    // Body line `i` is the paragraph's line `i + 1`, past the opening `$$`.
+    let mut body_lines = body.map(|body| body.split('\n'));
+    let cols: Vec<Option<u32>> = src
+        .cols()
+        .enumerate()
+        .map(|(k, col)| {
+            if k == 0 {
+                return col;
+            }
+            let text = body_lines.as_mut()?.next()?;
+            // `body` is CRLF-normalized already; the source line isn't.
+            let raw = line_text(k).trim_end_matches('\r');
+            raw.ends_with(text)
+                .then(|| to_u32(raw.chars().count() - text.chars().count()))
+        })
+        .collect();
+    SrcLines::new(src.first, &cols)
 }
 
 /// Split a display-math paragraph's source into `count` byte ranges, one per `$$...$$` formula.

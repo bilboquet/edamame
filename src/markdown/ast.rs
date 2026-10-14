@@ -22,7 +22,10 @@ pub struct SrcLines {
     /// `None` for a line that is all chrome (a fence, a setext underline, a table's delimiter
     /// row, a metadata delimiter), and for a line that only continues an atomic inline begun on
     /// an earlier line (the tail of a multi-line code span, math span, or inline HTML), which
-    /// renders on the row of the line it began on and has no content start of its own.
+    /// renders on the row of the line it began on and has no content start of its own.  The
+    /// exception is a `$$` formula that renders as a ` math ` block: each of its body lines is a
+    /// row, and has the column its formula line starts at
+    /// (`parser::post_pass::with_formula_cols`); an `ImageBlock` promoted from one keeps them.
     ///
     /// Columns are `u32`, not `u16`: a column is bounded by line length, not by terminal
     /// width, and the document is untrusted.  A wider one saturates at `u32::MAX`.

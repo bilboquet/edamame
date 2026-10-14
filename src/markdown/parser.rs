@@ -3,8 +3,9 @@ mod stream;
 
 pub use post_pass::{
     attach_nested_tui_columns_comments, attach_trailing_tui_columns_comments,
-    promote_diagram_code_blocks, promote_display_math_paragraphs, promote_html_comments,
-    promote_image_paragraphs, reconstruct_broken_display_math, split_display_math_paragraphs,
+    display_math_block_body, promote_diagram_code_blocks, promote_display_math_paragraphs,
+    promote_html_comments, promote_image_paragraphs, reconstruct_broken_display_math,
+    split_display_math_paragraphs,
 };
 
 use std::ops::Range;
@@ -179,7 +180,7 @@ where
                 let inlines = parse_inlines(events);
                 let src = events.end_leaf();
                 if !inlines.is_empty() {
-                    blocks.push(Block::Paragraph { inlines, src });
+                    blocks.push(paragraph(events, inlines, src));
                 }
             }
 
@@ -206,8 +207,21 @@ where
     if inlines.is_empty() {
         None
     } else {
-        Some(Block::Paragraph { inlines, src })
+        Some(paragraph(events, inlines, src))
     }
+}
+
+/// A paragraph of `inlines`.  One that renders as a ` math ` block takes its formula's body
+/// columns from the source ([`EventStream::with_formula_cols`]).
+fn paragraph<'a, I>(events: &EventStream<'a, I>, inlines: Vec<Inline>, src: SrcLines) -> Block
+where
+    I: Iterator<Item = (Event<'a>, Range<usize>)>,
+{
+    let src = match post_pass::math_block_body(&inlines) {
+        Some(body) => events.with_formula_cols(&src, &body),
+        None => src,
+    };
+    Block::Paragraph { inlines, src }
 }
 
 /// Consume `Start(Heading { .. }) … End(Heading)`.  `None` only if the peeked event was
@@ -453,7 +467,7 @@ where
                     let src = events.end_leaf();
                     consume_end(events); // End(Paragraph)
                     if !inlines.is_empty() {
-                        blocks.push(Block::Paragraph { inlines, src });
+                        blocks.push(paragraph(events, inlines, src));
                     }
                     blocks.extend(parse_blocks(events, false));
                 } else {
@@ -811,11 +825,39 @@ mod tests {
                     source: "\nx^2 + y^2 = z^2\n".into(),
                     display: true,
                 }],
-                // The formula's later lines continue the one math span begun on line 0.
-                src: src_lines(0, &[Some(0), None, None]),
+                // The formula's later lines continue the one math span begun on line 0, but its
+                // body line is a row of the ` math ` block it renders as, with its own column.
+                src: src_lines(0, &[Some(0), Some(0), None]),
             }],
             "a paragraph holding only $$...$$ should parse as one display-math inline"
         );
+    }
+
+    /// A formula line behind a shorter prefix than its `$$` line's starts at its own column:
+    /// `>x` under `> $$`, and a lazy continuation line, which has no prefix at all.
+    #[test]
+    fn a_math_blocks_body_lines_record_their_own_columns() {
+        let cols = |src: &str| match &parse(src)[0] {
+            Block::BlockQuote { blocks, .. } => blocks[0].src().unwrap().cols().collect::<Vec<_>>(),
+            other => panic!("expected a quote: {other:?}"),
+        };
+        assert_eq!(
+            cols("> $$\n>x^2\n> y\n> $$\n"),
+            [Some(2), Some(1), Some(2), None]
+        );
+        assert_eq!(cols("> $$\nx^2\n> $$\n"), [Some(2), Some(0), None]);
+        // A paragraph that isn't a ` math ` block keeps its formula's tail without one.
+        assert_eq!(cols("> a $$\n>x^2\n> $$\n"), [Some(2), None, None]);
+    }
+
+    /// A source line that doesn't end with its formula line records no column, rather than one
+    /// that would show the wrong text; the renderer then falls back to the `$$` line's.
+    #[test]
+    fn a_formula_line_the_source_line_doesnt_end_with_records_no_column() {
+        let src = src_lines(0, &[Some(2), None, None, None]);
+        let lines = ["> $$", ">  x  ", "> y", "> $$"];
+        let got = post_pass::with_formula_cols(&src, Some("x\ny"), |k| lines[k]);
+        assert_eq!(got, src_lines(0, &[Some(2), None, Some(2), None]));
     }
 
     #[test]
@@ -1551,7 +1593,7 @@ mod tests {
         split_display_math_paragraphs(&mut blocks, &mut ranges, src);
         assert_eq!(blocks.len(), 2, "{blocks:?}");
         for block in &blocks {
-            assert_eq!(block.src(), Some(&src_lines(0, &[Some(0), None, None])));
+            assert_eq!(block.src(), Some(&src_lines(0, &[Some(0), Some(0), None])));
         }
     }
 

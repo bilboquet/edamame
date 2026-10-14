@@ -417,6 +417,13 @@ where
         src
     }
 
+    /// `src`, a paragraph's, with [`with_formula_cols`](super::post_pass::with_formula_cols) for
+    /// the `$$` block it renders as, whose formula is `body`.
+    pub(super) fn with_formula_cols(&self, src: &SrcLines, body: &str) -> SrcLines {
+        let first = self.base_line + src.first as usize;
+        super::post_pass::with_formula_cols(src, Some(body), |k| self.lines.line_text(first + k))
+    }
+
     /// Note `event`'s position against the open leaf, if any.
     ///
     /// Kept out of line so it doesn't bloat [`next`](Self::next), the parser's hottest loop.
