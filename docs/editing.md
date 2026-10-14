@@ -35,13 +35,9 @@ edamame parses CommonMark plus [GitHub Flavored Markdown](https://github.github.
 
 **Smart punctuation is on**, and currently not configurable. Straight quotes render as curly ones, `--` becomes an en dash, `...` becomes an ellipsis. Your source file is untouched — this is display only.
 
-**Paragraphs reflow to the width of your terminal.** If you hard-wrap prose in the source — a line break every 80 columns, say — those single line breaks are treated as spaces, except between two Chinese or Japanese characters, where they vanish, since those languages don't put spaces between words (Firefox renders web pages the same way). edamame joins them back into one paragraph and wraps it to fit the view, instead of showing a stack of ragged short lines. A deliberate line break — two trailing spaces or a backslash at the end of a line — is kept. Turn reflow off with **Reflow paragraphs** in the settings overlay, or `reflow = false` in `config.toml`.
+**Paragraphs reflow to the width of your terminal.** If you hard-wrap prose in the source — a line break every 80 columns, say — those single line breaks are treated as spaces (except between two Chinese or Japanese characters). edamame joins them back into one paragraph and wraps it to fit the view, instead of showing a stack of ragged short lines. A deliberate line break — two trailing spaces or a backslash at the end of a line — is kept. Turn reflow off with **Reflow paragraphs** in the settings overlay, or `reflow = false` in `config.toml`.
 
-Reflow applies to every paragraph, including the text of a list item, a blockquote or a footnote, which wraps under its bullet or bar. When the cursor enters a reflowed paragraph, it opens up to show your source lines exactly as written, `>` and `-` markers included, so you can edit them, and folds back up when you leave.
-
-With reflow off, every paragraph keeps your line breaks, one row per source line, including a break inside bold, italic or link text. A heading written over several lines (text underlined with `===` or `---`) still shows as one row, and opens up to all of its lines while the cursor is on any of them, underline included.
-
-Blank lines inside a blockquote (a line holding only `>`) show as empty quoted rows, exactly as many as you wrote. So do the blank lines between the paragraphs, code blocks and other blocks of one list item or footnote, and an item's later paragraphs line up under its text. A link reference definition (`[label]: /url`) shows nothing, inside a quote or out. With the cursor on one inside a quote or list item, it shows along with the line below it (or above it, at the end of the quote or item).
+Reflow applies to every paragraph, including the text of a list item, a blockquote or a footnote, which wraps under its bullet or bar. When the cursor enters a reflowed paragraph, it opens up to show your source lines exactly as written, `>` and `-` markers included, so you can edit them, and folds back up when you leave. With reflow off, every paragraph keeps your line breaks, one row per source line, including a break inside bold, italic or link text. 
 
 **Frontmatter is shown as data, not prose.** A `---`-delimited YAML block (or a `+++`-delimited TOML one) at the top of a file renders verbatim — one row per source line, dimmed, with each key picked out from its value. It stays fully editable, and it is left out of an HTML export, since it describes the document rather than belonging to it.
 
@@ -99,17 +95,9 @@ Completed items dim and get struck through. This is configurable in the theme.
 
 Tables render as a drawn grid, and edit a cell at a time. In Edit mode the cell you're in shows its raw text in place; everything else stays formatted.
 
-Any GitHub table works this way: with or without pipes at the ends of its rows, and inside a list item, blockquote, or footnote. Rows may have fewer or more cells than the header, as GitHub allows: missing cells show empty, and extra cells are hidden, as GitHub hides them.
-
 ### Creating one
 
 `Ctrl-Shift-T`, or "Insert table" in the palette. You'll be asked for rows and columns. **The cursor has to be on a blank line or an empty list item** — otherwise you get an error flash instead of a table. Inside a list, the table goes where text you typed there would go:
-
-- On an empty item (`- `, `1. `), it fills the item, starting on the marker's line. Task items (`- [ ]`) don't qualify.
-- On the blank line directly below an item, it joins that item, indented to match.
-- Further down, past another blank line, it joins an item only if the line is already indented to that item's text; otherwise it starts a new top-level table, as after leaving a list with `Enter`.
-
-Lists inside a quote or footnote get a top-level table.
 
 ### Moving around
 
@@ -119,7 +107,7 @@ Lists inside a quote or footnote get a top-level table.
 | `Enter` | Next row |
 | `Shift-Enter` | Insert a literal `<br>` |
 
-Outside a table these keys do their normal thing, so nothing is taken away from you. `Tab` skips the empty cells of a row with fewer cells than the header, since there's no text there to land in; click one to type into it.
+Outside a table these keys function normally. `Tab` skips the empty cells of a row with fewer cells than the header, since there's no text there to land in; click one to type into it.
 
 > `Shift-Enter` inserts `<br>`, which is how GitHub-flavored Markdown writes a multi-line cell. Be aware that edamame's own renderer currently shows it as literal `<br>` text rather than breaking the line, and HTML export strips it.
 
@@ -137,8 +125,6 @@ The arrow points the direction; `Shift` turns "move" into "insert".
 | `Alt-Shift-Backspace` | Delete column |
 
 All ten are in the palette as `Table: …` — worth knowing, because the `Alt-Shift` chords need a modern terminal.
-
-Each row keeps the style you wrote it in: a table without pipes at its row ends stays that way. The exception is a row that needs those pipes to stay part of the table, so edamame adds them: one whose first or last cell is empty, one with a single cell, or one whose new first cell would otherwise start something else, such as a list item (`- x`) or a heading (`# x`).
 
 ### With a mouse
 
@@ -191,7 +177,7 @@ What happens depends on the target:
 | `#heading` | Jumps within the document |
 | `[^note]` | Jumps to the footnote |
 
-A heading is named by its GitHub-style slug: lowercase, punctuation and symbols dropped, each space turned into a hyphen — `## When the file changes` is `#when-the-file-changes`. Letters in any script are kept, so `## 日本語の見出し` is `#日本語の見出し`, and a link copied from GitHub or a browser, which spells it `#%E6%97%A5…`, works too. When two headings share a slug, the later ones get `-1`, `-2`, … appended, as on GitHub. A bare `#` goes to the top of the document. That is the same fragment GitHub and your browser resolve, so a link that works here works everywhere else too. If nothing in the target document matches, the file still opens and the hint line tells you the section wasn't found.
+A heading is named by its GitHub-style slug: lowercase, punctuation and symbols dropped, each space turned into a hyphen — `## When the file changes` is `#when-the-file-changes`. When two headings share a slug, the later ones get `-1`, `-2`, … appended, as on GitHub. A bare `#` goes to the top of the document. That is the same fragment GitHub and your browser resolve, so a link that works here works everywhere else too. If nothing in the target document matches, the file still opens and the hint line tells you the section wasn't found.
 
 `Alt-←` / `Alt-→` move back and forward through everywhere you've been — across files and within a document. Leaving a modified file prompts first.
 
