@@ -34,6 +34,8 @@ Each released version's section is also what ships as the GitHub release notes: 
 - The `↩` after a footnote is now clickable when the footnote wraps or contains CJK text.
 - Editing a Mermaid block closed with `~~~` or a longer fence no longer shows that fence as a diagram line.
 - Dialogs now size theme and stylesheet names written in CJK correctly.
+- Accented letters and Korean text stored in decomposed form, common in files from macOS, no longer lose their accents, vowels or final consonants on screen.
+- Code blocks no longer add a blank row after each line of CJK text.
 - HTML comments inside a list item, quote or footnote are now hidden, as they already were elsewhere, and a column-width comment after a table inside a list item now sets its widths.
 - In a very narrow window, clicks and highlights on the wrapped rows of a list item now land on the character under them.
 - Wrapped footnotes now line up under their text, and a paragraph starting with an escaped `1\.` or `\-` no longer wraps like a list item.

@@ -150,7 +150,8 @@ fn char_at(buf: &Buffer, offset: usize) -> char {
 }
 
 /// Absolute char offset on `line_idx` at screen cell column `target_cell`, with the same landing
-/// rules as `wrap::char_idx_at_cell_col` (wide-char snap-past, past-content clamp).
+/// rules as `wrap::char_idx_at_cell_col` (wide-char snap-past, marks included; past-content
+/// clamp).
 fn char_offset_at_cell_col(buf: &Buffer, line_idx: usize, target_cell: usize) -> usize {
     let line_start = buf.line_to_char(line_idx);
     let line_end = if line_idx + 1 < buf.line_count() {
@@ -167,11 +168,14 @@ fn char_offset_at_cell_col(buf: &Buffer, line_idx: usize, target_cell: usize) ->
         let ch = char_at(buf, offset);
         let w = char_cells(ch);
         if acc + w > target_cell {
-            return if acc == target_cell {
-                offset
-            } else {
-                offset + 1
-            };
+            if acc == target_cell {
+                return offset;
+            }
+            offset += 1;
+            while offset < line_end && char_cells(char_at(buf, offset)) == 0 {
+                offset += 1;
+            }
+            return offset;
         }
         acc += w;
         offset += 1;
@@ -409,6 +413,15 @@ mod tests {
     fn move_down_onto_wide_char_snaps_past_glyph() {
         // preferred_col=1 is mid-emoji on line 1: snap after it, never into its right half.
         let b = buf("AB\n🥇C");
+        let mut c = cur_pc(1, 1);
+        c.move_down(&b);
+        assert_eq!(b.rope().char(c.offset), 'C');
+    }
+
+    #[test]
+    fn move_down_onto_wide_char_snaps_past_its_marks() {
+        // Mid-`⌚` + U+FE0E: snap past the selector too, which has no cell to draw a cursor in.
+        let b = buf("AB\n\u{231A}\u{FE0E}C");
         let mut c = cur_pc(1, 1);
         c.move_down(&b);
         assert_eq!(b.rope().char(c.offset), 'C');

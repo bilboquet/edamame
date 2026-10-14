@@ -1,4 +1,6 @@
 use ratatui::{buffer::Buffer as TuiBuf, layout::Rect, style::Style, text::Line};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::document::wrap::{char_cells, visual_rows_of_chars, Indent, PaintedRows};
 
@@ -245,6 +247,34 @@ fn render_line_core(
     (cur_visual - visual_y, cursor_cell)
 }
 
+/// Join zero-width `ch` (a combining mark, a Hangul vowel or final jamo) to the glyph already
+/// painted at `at`, which the terminal composes into one grapheme in the same cells.  Painting
+/// it in a cell of its own would shift the row; skipping it drops it (`cafe\u{301}` showed as
+/// `cafe`).
+///
+/// Only a char that extends the cell's grapheme cluster joins it.  Any other zero-width char
+/// stays dropped: a tab or other control char (`char_cells` gives them 0 as well), which would
+/// move the terminal's cursor, and a zero-width space, which joins nothing.  So does a char
+/// that changes the cluster's width as ratatui measures it (`❤` + U+FE0F = 2, `⌚` + U+FE0E =
+/// 1): ratatui's diff skips the cells after a glyph by that width, so it must agree with the
+/// per-char sum the layout gives the cell, or the rest of the row shifts off the cells the
+/// cursor and clicks map to.  A zero-width joiner stays dropped too, though it changes no
+/// width: the terminal may fuse it with the next cell's glyph (a ZWJ family drawn in 2 cells
+/// rather than 6).
+pub(crate) fn append_zero_width(buf: &mut TuiBuf, at: (u16, u16), ch: char) {
+    if ch == '\u{200D}' {
+        return;
+    }
+    if let Some(cell) = buf.cell_mut(at) {
+        let mut symbol = cell.symbol().to_owned();
+        let width = symbol.width();
+        symbol.push(ch);
+        if symbol.graphemes(true).nth(1).is_none() && symbol.width() == width {
+            cell.set_symbol(&symbol);
+        }
+    }
+}
+
 /// Paint one visual row: `chars[start..end]` after `row_indent` cells of padding.
 /// `abs_col_base` is added to each relative index when matching
 /// `cursor_col_override` — the row's `start` when wrapped, 0 on the no-wrap path.
@@ -294,18 +324,24 @@ fn paint_row(
     }
     // The last char's cell, while every char of the row has one (for the full-row EOL cursor).
     let mut last_cell = None;
+    // The cell of the last glyph painted on this row, which a zero-width char joins.
+    let mut glyph_cell = None;
     for (rel_idx, (ch, style)) in chars[start..end].iter().enumerate() {
         let cells = char_cells(*ch) as u16;
-        if cells == 0 || x >= area_end {
-            // Zero-width chars merge into the preceding grapheme: skip without
-            // advancing `x` rather than overwriting that cell's glyph.
-            if cells == 0 {
-                continue;
+        if cells == 0 {
+            // Zero-width chars join the preceding glyph's cell without advancing `x`, so
+            // each char keeps the width `str_cells` measures.
+            if let Some(at) = glyph_cell {
+                append_zero_width(buf, at, *ch);
             }
+            continue;
+        }
+        if x >= area_end {
             last_cell = None;
             break;
         }
         last_cell = Some(x);
+        glyph_cell = Some((x, abs_y));
         let abs_col = abs_col_base + rel_idx;
         let cursor_style = cursor_col_override
             .filter(|(col, _)| *col == abs_col)
@@ -643,11 +679,62 @@ mod tests {
         render_line(&line, Indent::NONE, area, &mut buf, 0, false);
         assert_eq!(
             buf.cell((0, 0)).map(|c| c.symbol().to_string()),
-            Some("e".into())
+            Some("e\u{0301}".into())
         );
         assert_eq!(
             buf.cell((1, 0)).map(|c| c.symbol().to_string()),
             Some("!".into())
         );
+    }
+
+    /// A zero-width char joins the glyph before it instead of vanishing: a combining accent,
+    /// and the vowel and final jamo of decomposed (NFD) Hangul, which macOS writes.  A wide
+    /// glyph's marks go to its first cell, and every later char keeps its cell.
+    #[test]
+    fn zero_width_chars_join_the_preceding_glyph() {
+        let area = Rect::new(0, 0, 12, 1);
+        let mut buf = TuiBuf::empty(area);
+        // `한국` decomposed, then `é` decomposed.
+        let text = "\u{1112}\u{1161}\u{11AB}\u{1100}\u{116E}\u{11A8}e\u{0301}!";
+        render_line(&Line::from(text), Indent::NONE, area, &mut buf, 0, false);
+        let cells: Vec<&str> = (0..6).map(|x| buf[(x, 0)].symbol()).collect();
+        assert_eq!(
+            cells,
+            [
+                "\u{1112}\u{1161}\u{11AB}",
+                " ",
+                "\u{1100}\u{116E}\u{11A8}",
+                " ",
+                "e\u{0301}",
+                "!",
+            ]
+        );
+    }
+
+    /// A zero-width joiner stays dropped, as do U+FE0F and U+FE0E, which change the cluster's
+    /// width from the per-char cells the layout gives it.  So do a tab, which would move the terminal's
+    /// cursor, and a zero-width space, which extends no cluster.  A mark opening a row has no
+    /// glyph to join.
+    #[test]
+    fn zero_width_chars_that_join_no_cluster_or_widen_it_are_dropped() {
+        let area = Rect::new(0, 0, 10, 1);
+        let mut buf = TuiBuf::empty(area);
+        render_line(
+            &Line::from(
+                "\u{0301}\u{2764}\u{FE0F}\u{1F468}\u{200D}\u{1F469}a\tb\u{200B}c\u{231A}\u{FE0E}",
+            ),
+            Indent::NONE,
+            area,
+            &mut buf,
+            0,
+            false,
+        );
+        let cells: Vec<&str> = (0..7).map(|x| buf[(x, 0)].symbol()).collect();
+        assert_eq!(
+            cells,
+            ["\u{2764}", "\u{1F468}", " ", "\u{1F469}", " ", "a", "b"]
+        );
+        assert_eq!(buf[(7, 0)].symbol(), "c");
+        assert_eq!(buf[(8, 0)].symbol(), "\u{231A}");
     }
 }

@@ -773,9 +773,13 @@ impl<'t> Renderer<'t> {
     /// `(char, style)` pairs.
     fn code_body_row(&self, text: &str, tokens: &[Token], block_width: usize) -> Line<'static> {
         let base = self.theme.code_block_text;
-        let pad_to = block_width.saturating_sub(CODE_PAD_COLS);
+        // The fill is measured in cells, so a line of wide glyphs isn't padded past the edge
+        // into a wrapped blank row.
+        let fill = block_width
+            .saturating_sub(CODE_PAD_COLS)
+            .saturating_sub(str_cells(text));
         if tokens.is_empty() {
-            return Line::styled(format!(" {text:<pad_to$}"), base);
+            return Line::styled(format!(" {text}{}", " ".repeat(fill)), base);
         }
 
         let chars: Vec<char> = text.chars().collect();
@@ -802,9 +806,9 @@ impl<'t> Renderer<'t> {
             spans.push(Span::styled(run(col, chars.len()), base));
         }
 
-        // Fill to the viewport edge, matching the `{:<pad_to$}` above.
-        if let Some(pad) = pad_to.checked_sub(chars.len()).filter(|p| *p > 0) {
-            spans.push(Span::styled(" ".repeat(pad), base));
+        // Fill to the viewport edge, as the unhighlighted row above does.
+        if fill > 0 {
+            spans.push(Span::styled(" ".repeat(fill), base));
         }
         Line::from(spans).style(base)
     }
@@ -2245,6 +2249,29 @@ mod tests {
             string_rows > 1,
             "the literal should stay styled across every wrapped row"
         );
+    }
+
+    /// A code row fills the viewport in cells, not chars: padding a line of wide glyphs by its
+    /// char count overran the edge, and the overflow wrapped into a blank row of its own.
+    /// Highlighted or not.
+    #[test]
+    fn a_code_row_of_wide_glyphs_pads_to_the_viewport_edge_in_cells() {
+        for src in [
+            "```\n日本語のコード\n```\n",
+            "```rust\nlet 日本 = 1;\n```\n",
+        ] {
+            warm_fence_languages(src);
+            let blocks = parse(src);
+            let lines = renderer()
+                .with_viewport_width(20)
+                .with_syntax_highlighting(true)
+                .render(&blocks);
+            let body = lines
+                .iter()
+                .find(|l| plain_text(l).contains('日'))
+                .expect("the code row");
+            assert_eq!(str_cells(&plain_text(body)), 20, "in {src:?}");
+        }
     }
 
     #[test]

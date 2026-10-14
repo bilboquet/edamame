@@ -44,9 +44,10 @@ pub fn char_cells(ch: char) -> usize {
 /// Terminal cells `s` occupies when painted: the sum of [`char_cells`].
 ///
 /// Deliberately not `UnicodeWidthStr::width`, which is sequence-aware (`❤️` = 2, a ZWJ family
-/// = 2): `line_render::paint_row` draws char by char, skipping zero-width chars, so what
-/// reaches the screen is the per-char sum (`❤️` = 1, the family = 6).  Measuring any other
-/// way sizes a column for a width it is not drawn at.
+/// = 2): `line_render::paint_row` draws char by char, a zero-width char taking no cell of its
+/// own (it joins its glyph's, or is dropped), so what reaches the screen is the per-char sum
+/// (`❤️` = 1, the family = 6).  Measuring any other way sizes a column for a width it is not
+/// drawn at.
 pub fn str_cells(s: &str) -> usize {
     s.chars().map(char_cells).sum()
 }
@@ -233,7 +234,7 @@ pub fn joints(chars: &[char]) -> Vec<Joint> {
 
 /// Char index where the last grapheme cluster of `chars` begins; 0 when empty.  Where a cursor
 /// clamped onto "the last char" must land: the last *char* may be a zero-width mark (VS16, a
-/// combining accent) that no painter draws.
+/// combining accent) that has no cell of its own to draw the cursor on.
 pub fn last_cluster_start(chars: &[char]) -> usize {
     let joints = joints(chars);
     (0..chars.len())
@@ -1026,8 +1027,9 @@ mod tests {
             .collect()
     }
 
-    /// The painter's unit, not `UnicodeWidthStr`'s: `line_render::paint_row` skips zero-width
-    /// chars, so VS16 widens nothing and a ZWJ family paints as its three members.
+    /// The painter's unit, not `UnicodeWidthStr`'s: `line_render::paint_row` gives zero-width
+    /// chars no cell of their own, so VS16 widens nothing and a ZWJ family paints as its three
+    /// members.
     #[test]
     fn str_cells_is_the_per_char_sum_the_painter_draws() {
         assert_eq!(str_cells("日本"), 4);
@@ -1365,7 +1367,7 @@ mod tests {
     }
 
     /// When the last char is a zero-width mark, the clamp lands on its cluster's base char:
-    /// the painter skips zero-width chars, so a cursor on the mark would not be drawn.
+    /// a zero-width char has no cell of its own, so a cursor on the mark would not be drawn.
     #[test]
     fn compute_cell_overlay_clamps_a_cursor_onto_the_last_cluster() {
         // ` ` ` ` a b c e U+0301: seven chars, six cells — exactly the content area.

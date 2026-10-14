@@ -22,8 +22,9 @@ pub fn char_cells(ch: char) -> usize {
 ///
 /// - `target_cell <= indent` lands at char 0 — hanging-indent padding is virtual, not
 ///   text, so the cursor never sits in it.
-/// - A `target_cell` *inside* a multi-cell glyph lands after it; the cursor never sits in
-///   a wide char's right half.
+/// - A `target_cell` *inside* a multi-cell glyph lands after it and the zero-width chars
+///   joined to it (`⌚` + U+FE0E, a decomposed Hangul syllable's vowel and final); the
+///   cursor never sits in a wide char's right half, nor on a mark with no cell to draw it.
 /// - Past the row's width, returns one past the last char for the caller to clamp.
 pub fn char_idx_at_cell_col<I>(iter: I, target_cell: usize, indent: usize) -> usize
 where
@@ -34,10 +35,18 @@ where
     }
     let mut acc = indent;
     let mut count = 0;
-    for ch in iter {
+    let mut chars = iter.into_iter().peekable();
+    while let Some(ch) = chars.next() {
         let w = char_cells(ch);
         if acc + w > target_cell {
-            return if acc == target_cell { count } else { count + 1 };
+            if acc == target_cell {
+                return count;
+            }
+            count += 1;
+            while chars.next_if(|&c| char_cells(c) == 0).is_some() {
+                count += 1;
+            }
+            return count;
         }
         acc += w;
         count += 1;
@@ -874,6 +883,18 @@ mod tests {
         assert_eq!(char_idx_at_cell_col(chars.iter().copied(), 0, 0), 0);
         assert_eq!(char_idx_at_cell_col(chars.iter().copied(), 1, 0), 1);
         assert_eq!(char_idx_at_cell_col(chars.iter().copied(), 2, 0), 1);
+    }
+
+    /// The right half of a wide glyph lands past the zero-width chars joined to it too: a
+    /// cursor on one of them has no cell to be drawn in.
+    #[test]
+    fn char_idx_at_cell_col_snaps_past_a_wide_glyphs_marks() {
+        // `⌚` + U+FE0E, then decomposed `한` (initial, vowel, final), then `x`.
+        let chars = [
+            '\u{231A}', '\u{FE0E}', '\u{1112}', '\u{1161}', '\u{11AB}', 'x',
+        ];
+        let at = |cell| char_idx_at_cell_col(chars.iter().copied(), cell, 0);
+        assert_eq!([at(0), at(1), at(2), at(3), at(4)], [0, 2, 2, 5, 5]);
     }
 
     #[test]

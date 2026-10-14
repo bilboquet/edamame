@@ -556,15 +556,21 @@ pub(super) fn overlay_raw_cell(
     let mut chars = overlay.raw_text.chars();
     let mut col = overlay.rendered_start;
     let mut i = 0usize;
+    // The cell of the last glyph painted, which a zero-width char joins.
+    let mut glyph_cell = None;
     while col < overlay.rendered_end {
         let mut ch = chars.next().unwrap_or(' ');
         let mut w = char_cells(ch);
         if w == 0 {
-            // Zero-width chars merge into the preceding glyph, as in `line_render::paint_row`.
+            // Zero-width chars join the preceding glyph, as in `line_render::paint_row`.
+            if let Some(at) = glyph_cell {
+                line_render::append_zero_width(buf, at, ch);
+            }
             i += 1;
             continue;
         }
-        if col + w > overlay.rendered_end {
+        let straddles = col + w > overlay.rendered_end;
+        if straddles {
             // Never straddle the border: blank the last cell instead.
             (ch, w) = (' ', 1);
         }
@@ -572,6 +578,8 @@ pub(super) fn overlay_raw_cell(
         if abs_x >= area_end {
             break;
         }
+        // The blank standing in for a wide glyph is no glyph for its marks to join.
+        glyph_cell = (!straddles).then_some((abs_x, abs_y));
         let mut style = base_style;
         if matches!(selection_cols, Some((s, e)) if i >= s && i < e) {
             style = style.patch(theme.selection);
@@ -640,6 +648,22 @@ mod tests {
         let buf = painted(&overlay(1, 4, "ab日", None), Style::default());
         assert_eq!(buf[(3, 0)].symbol(), " ");
         assert_eq!(buf[(4, 0)].symbol(), "x");
+    }
+
+    /// A revealed cell's zero-width char joins the glyph before it, as on any other row.
+    #[test]
+    fn overlay_raw_cell_joins_zero_width_chars_to_the_preceding_glyph() {
+        let buf = painted(&overlay(1, 6, "e\u{0301}a", None), Style::default());
+        assert_eq!(buf[(1, 0)].symbol(), "e\u{0301}");
+        assert_eq!(buf[(2, 0)].symbol(), "a");
+    }
+
+    /// A wide glyph blanked at the border takes its marks with it: they don't join the blank.
+    #[test]
+    fn overlay_raw_cell_drops_the_marks_of_a_glyph_blanked_at_the_border() {
+        let buf = painted(&overlay(1, 3, "a\u{304B}\u{3099}", None), Style::default());
+        assert_eq!(buf[(1, 0)].symbol(), "a");
+        assert_eq!(buf[(2, 0)].symbol(), " ");
     }
 
     /// A chrome row (here a fence's ` rust ` label) has no column relation to its line: a

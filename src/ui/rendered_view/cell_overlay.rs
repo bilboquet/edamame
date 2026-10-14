@@ -315,7 +315,7 @@ mod tests {
     }
 
     /// A cursor past a full last chunk clamps onto its last glyph — the `e`, not the zero-width
-    /// accent after it, which the painter would skip.
+    /// accent after it, which has no cell of its own.
     #[test]
     fn chunk_overlay_clamps_a_cursor_onto_the_last_cluster() {
         let line = Line::from("│ abcd │");

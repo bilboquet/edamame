@@ -319,6 +319,30 @@ $$
 E = mc^2
 $$
 
-## 9. Preview mode
+## 9. Combining marks and wide glyphs
+
+Every word below is stored decomposed (NFD), as macOS writes it: each accent, Hangul vowel and final consonant is a char of its own. It shows composed, never as `cafe` or a bare initial consonant, and the text after it doesn't shift: a click lands on the char under it, and moving through it never stops the cursor on a mark.
+
+Decomposed: café, naïve, 한국어, が.
+
+Emoji with a presentation selector take the cells they're laid out at, so the word after each stays put: ⌚︎ watch, ❤️ heart, ⌚ watch, ❤ heart.
+
+| Word | Meaning |
+|---|---|
+| café | coffee |
+| 한국어 | Korean |
+
+Each line of CJK code is one row, with no blank row after it, and its fill ends at the window edge:
+
+```
+日本語のコード
+한국어 café
+```
+
+```rust
+let 日本 = "が";
+```
+
+## 10. Preview mode
 
 Switch to Preview and repeat a few clicks from every section: nothing reveals, a click on the cursor's row maps normally, and the nested table above gets the cell band.
