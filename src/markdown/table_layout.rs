@@ -4,7 +4,8 @@
 //!
 //! Widths are in *terminal cells*, always through [`char_cells`] / [`str_cells`] — the unit
 //! `ui::line_render` paints in, so a CJK glyph costs two.  Wrapping breaks at soft spaces and
-//! beside wide glyphs ([`Joint::Glyph`]), never inside a grapheme cluster.
+//! beside wide glyphs ([`Joint::Glyph`]), never inside a grapheme cluster.  The prose wrap
+//! (`document::wrap`) reads the same joints.
 //!
 //! # Width calculation strategy — min-max proportional
 //!
@@ -199,7 +200,10 @@ pub enum Joint {
     /// Between clusters: a hard split may cut here.
     Cluster,
     /// Beside a wide glyph with no whitespace on either side: a break as good as a space.
-    /// CJK carries no inter-word spaces, so its text breaks between any two glyphs.
+    /// CJK carries no inter-word spaces, so its text breaks between any two glyphs, except
+    /// before closing punctuation ([`no_break_before`]), after opening punctuation
+    /// ([`no_break_after`]), or beside a no-break char ([`is_no_break_char`]) or a quote
+    /// ([`is_ambiguous_quote`]).
     Glyph,
 }
 
@@ -207,29 +211,134 @@ pub enum Joint {
 /// [`Joint::Cluster`]).  A cluster is wide when it paints more than one cell.  The all-ASCII
 /// fast path skips segmentation: every joint is `Cluster`.
 pub fn joints(chars: &[char]) -> Vec<Joint> {
-    let mut out = vec![Joint::Cluster; chars.len() + 1];
     if chars.iter().all(char::is_ascii) {
-        return out;
+        return vec![Joint::Cluster; chars.len() + 1];
     }
-    let text: String = chars.iter().collect();
+    joints_in_str(&chars.iter().collect::<String>(), chars.len())
+}
+
+/// [`joints`] over `text`, which holds `n_chars` chars, for a caller that already has the text
+/// as a string (the prose wrap, on its per-keystroke path).  No ASCII fast path: that is the
+/// caller's.
+pub fn joints_in_str(text: &str, n_chars: usize) -> Vec<Joint> {
+    let mut out = vec![Joint::Cluster; n_chars + 1];
     let mut idx = 0usize;
-    let mut prev_wide: Option<bool> = None;
+    // The previous cluster's last char, and whether that cluster was wide.
+    let mut prev: Option<(char, bool)> = None;
     for cluster in text.graphemes(true) {
         let len = cluster.chars().count();
         let wide = str_cells(cluster) > 1;
         for joint in &mut out[idx + 1..idx + len] {
             *joint = Joint::Inside;
         }
-        if let Some(prev_wide) = prev_wide {
-            let spaced = chars[idx - 1].is_whitespace() || chars[idx].is_whitespace();
-            if (wide || prev_wide) && !spaced {
+        if let (Some((before, prev_wide)), Some(after)) = (prev, cluster.chars().next()) {
+            let spaced = before.is_whitespace() || after.is_whitespace();
+            let bound = no_break_after(before)
+                || no_break_before(after)
+                || [before, after]
+                    .into_iter()
+                    .any(|c| is_no_break_char(c) || is_ambiguous_quote(c));
+            if (wide || prev_wide) && !spaced && !bound {
                 out[idx] = Joint::Glyph;
             }
         }
-        prev_wide = Some(wide);
+        prev = cluster.chars().last().map(|c| (c, wide));
         idx += len;
     }
     out
+}
+
+/// Chars that carry no break on either side (UAX #14 GL / WJ).  A no-break space is *defined*
+/// that way, and code blocks pad blank lines with U+00A0 — breaking there would split padding
+/// emitted precisely to keep a row intact.  Shared with the prose wrap (`document::wrap`).
+pub fn is_no_break_char(ch: char) -> bool {
+    matches!(ch, '\u{a0}' | '\u{202f}' | '\u{2060}' | '\u{feff}')
+}
+
+/// Quotes whose direction the char alone doesn't give (UAX #14 QU): `"`, `'`, and `’`, which is
+/// also an apostrophe (`’90s`).  No glyph break forms beside one, so a quote stays with the
+/// glyph it wraps.  The prose wrap (`document::wrap`) also reads their direction from the
+/// neighboring words.
+pub fn is_ambiguous_quote(ch: char) -> bool {
+    matches!(ch, '"' | '\'' | '\u{2019}')
+}
+
+/// Chars a row may not start with: closing brackets and quotes, sentence punctuation, and the
+/// CJK marks that lean on the glyph before them (the prolonged-sound mark, iteration marks).  An
+/// abridged UAX #14 CL / CP / EX / IS / NS, Japanese *kinsoku*: a break before one strands it at
+/// the head of the next row.  Shared with the prose wrap (`document::wrap`).
+pub fn no_break_before(ch: char) -> bool {
+    matches!(
+        ch,
+        ')' | ']'
+            | '}'
+            | '.'
+            | ','
+            | ':'
+            | ';'
+            | '!'
+            | '?'
+            | '\u{201d}' // ”
+            | '\u{bb}' // »
+            | '\u{2026}' // …
+            | '\u{2025}' // ‥
+            | '\u{3001}' // 、
+            | '\u{3002}' // 。
+            | '\u{3005}' // 々
+            | '\u{3009}' // 〉
+            | '\u{300b}' // 》
+            | '\u{300d}' // 」
+            | '\u{300f}' // 』
+            | '\u{3011}' // 】
+            | '\u{3015}' // 〕
+            | '\u{3017}' // 〗
+            | '\u{3019}' // 〙
+            | '\u{301f}' // 〟
+            | '\u{309d}' // ゝ
+            | '\u{309e}' // ゞ
+            | '\u{30fb}' // ・
+            | '\u{30fc}' // ー
+            | '\u{30fd}' // ヽ
+            | '\u{30fe}' // ヾ
+            | '\u{ff01}' // ！
+            | '\u{ff09}' // ）
+            | '\u{ff0c}' // ，
+            | '\u{ff0e}' // ．
+            | '\u{ff1a}' // ：
+            | '\u{ff1b}' // ；
+            | '\u{ff1f}' // ？
+            | '\u{ff3d}' // ］
+            | '\u{ff5d}' // ｝
+            | '\u{ff63}' // ｣
+    )
+}
+
+/// Chars a row may not end with: opening brackets and quotes (UAX #14 OP, abridged), which
+/// belong with the text they open.  Shared with the prose wrap (`document::wrap`).
+pub fn no_break_after(ch: char) -> bool {
+    matches!(
+        ch,
+        '(' | '['
+            | '{'
+            | '\u{2018}' // ‘
+            | '\u{201c}' // “
+            | '\u{ab}' // «
+            | '\u{bf}' // ¿
+            | '\u{a1}' // ¡
+            | '\u{3008}' // 〈
+            | '\u{300a}' // 《
+            | '\u{300c}' // 「
+            | '\u{300e}' // 『
+            | '\u{3010}' // 【
+            | '\u{3014}' // 〔
+            | '\u{3016}' // 〖
+            | '\u{3018}' // 〘
+            | '\u{301d}' // 〝
+            | '\u{ff08}' // （
+            | '\u{ff3b}' // ［
+            | '\u{ff5b}' // ｛
+            | '\u{ff62}' // ｢
+    )
 }
 
 /// Char index where the last grapheme cluster of `chars` begins; 0 when empty.  Where a cursor
@@ -1062,6 +1171,51 @@ mod tests {
             joints(&chars("e\u{301}x")),
             vec![Cluster, Inside, Cluster, Cluster]
         );
+    }
+
+    /// No glyph break forms before closing punctuation or after opening punctuation, so a cell's
+    /// `。` or `」` stays with the glyph before it and a `「` with the one after.
+    #[test]
+    fn joints_do_not_break_where_punctuation_binds() {
+        use Joint::*;
+        assert_eq!(
+            joints(&chars("日。本")),
+            vec![Cluster, Cluster, Glyph, Cluster]
+        );
+        assert_eq!(
+            joints(&chars("「日」x")),
+            vec![Cluster, Cluster, Cluster, Glyph, Cluster]
+        );
+    }
+
+    /// A word joiner forbids a break on either side, and a quote stays with the glyph it wraps.
+    #[test]
+    fn joints_do_not_break_beside_a_word_joiner_or_a_quote() {
+        use Joint::*;
+        assert_eq!(
+            joints(&chars("日\u{2060}本")),
+            vec![Cluster, Cluster, Cluster, Cluster]
+        );
+        assert_eq!(
+            joints(&chars("'日本'")),
+            vec![Cluster, Cluster, Glyph, Cluster, Cluster]
+        );
+        assert_eq!(
+            joints(&chars("日’本")),
+            vec![Cluster, Cluster, Cluster, Cluster]
+        );
+    }
+
+    /// The string entry point agrees with the char-slice one, wide glyphs, clusters and all.
+    #[test]
+    fn joints_in_str_matches_joints() {
+        for text in ["日本 語", "「日」x", "e\u{301}日👨\u{200d}👩", "a日\u{a0}b"] {
+            assert_eq!(
+                joints_in_str(text, text.chars().count()),
+                joints(&chars(text)),
+                "{text:?}"
+            );
+        }
     }
 
     /// NBSP pads a code span and must travel with it, so no glyph break forms beside one.

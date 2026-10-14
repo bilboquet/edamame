@@ -326,6 +326,8 @@ fn paint_row(
     let mut last_cell = None;
     // The cell of the last glyph painted on this row, which a zero-width char joins.
     let mut glyph_cell = None;
+    // The column of a glyph clipped at the area's edge, which the fill below stands in for.
+    let mut clipped = None;
     for (rel_idx, (ch, style)) in chars[start..end].iter().enumerate() {
         let cells = char_cells(*ch) as u16;
         if cells == 0 {
@@ -336,8 +338,12 @@ fn paint_row(
             }
             continue;
         }
-        if x >= area_end {
+        // A glyph that doesn't fit whole stays off the row rather than straddle the edge: its
+        // right half would land in the next widget's cell (unwrapped, or wrapped into a
+        // one-cell row).
+        if x + cells > area_end {
             last_cell = None;
+            clipped = Some(abs_col_base + rel_idx);
             break;
         }
         last_cell = Some(x);
@@ -357,12 +363,16 @@ fn paint_row(
     }
     // End-of-line cursor: its column is one past the last char, so the loop above never
     // reaches it — draw it on the first trailing blank cell instead.  Guarded on
-    // `col == chars.len()` so a word-wrap gap never matches.
+    // `col == chars.len()` so a word-wrap gap never matches.  Likewise a cursor on a glyph
+    // clipped at the edge takes the blank cell in its place, and the fill's columns resume from
+    // that glyph rather than the row's end.
     let eol_cursor = cursor_col_override.filter(|&(col, _)| col == chars.len());
-    let mut fill_col = abs_col_base + (end - start);
+    let fill_cursor =
+        cursor_col_override.filter(|&(col, _)| col == chars.len() || Some(col) == clipped);
+    let mut fill_col = clipped.unwrap_or(abs_col_base + (end - start));
     while x < area_end {
         if let Some(cell) = buf.cell_mut((x, abs_y)) {
-            if let Some((_, s)) = eol_cursor.filter(|&(col, _)| col == fill_col) {
+            if let Some((_, s)) = fill_cursor.filter(|&(col, _)| col == fill_col) {
                 cell.set_char(' ');
                 cell.set_style(s);
                 cursor_cell = Some((x, abs_y));
@@ -645,6 +655,48 @@ mod tests {
         assert_eq!(row(0), " 6. alpha   ");
         assert_eq!(row(1), "    bravo   ");
         assert_eq!(cursor, Some((4, 0)), "on the `a`, past the pad");
+    }
+
+    /// A wide glyph that doesn't fit whole stays off the row instead of painting its right half
+    /// into the next widget's cell: unwrapped at the edge, or wrapped into a one-cell row.
+    #[test]
+    fn a_wide_glyph_never_straddles_the_area_edge() {
+        for (text, width, wrap) in [("abc日", 4, false), ("日", 1, true)] {
+            let mut buf = TuiBuf::empty(Rect::new(0, 0, 6, 2));
+            for x in 0..6 {
+                buf[(x, 0)].set_char('x');
+            }
+            let area = Rect::new(0, 0, width, 2);
+            render_line(&Line::from(text), Indent::NONE, area, &mut buf, 0, wrap);
+            assert_ne!(
+                buf[(width - 1, 0)].symbol(),
+                "日",
+                "{text:?}: the last cell"
+            );
+            assert_eq!(buf[(width, 0)].symbol(), "x", "{text:?}: past the area");
+        }
+    }
+
+    /// The blank cell left by a clipped glyph stands in for that glyph: a cursor on it shows
+    /// there, and an end-of-line cursor doesn't, which would read as the line ending before it.
+    #[test]
+    fn a_clipped_glyph_s_blank_cell_carries_its_cursor_not_the_eol_one() {
+        let style = Style::default().fg(ratatui::style::Color::Red);
+        for (col, expected) in [(3, Some((3, 0))), (4, None)] {
+            let area = Rect::new(0, 0, 4, 1);
+            let mut buf = TuiBuf::empty(area);
+            let (_, cursor) = render_line_reporting_cursor(
+                &Line::from("abc日"),
+                Indent::NONE,
+                area,
+                &mut buf,
+                0,
+                false,
+                Some((col, style)),
+                0,
+            );
+            assert_eq!(cursor, expected, "cursor at column {col}");
+        }
     }
 
     #[test]

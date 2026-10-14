@@ -843,6 +843,39 @@ fn paint_rows(src: &str, width: u16, cursor: Option<usize>) -> (Vec<String>, Opt
     (rows, cell)
 }
 
+/// A prefix before long CJK text keeps the text's first glyphs on its row (issue #58): CJK
+/// breaks between any two glyphs, so a list marker, a quote bar or a `Note:` label no longer
+/// goes alone onto a row of its own.
+#[test]
+fn a_prefix_before_long_cjk_text_keeps_it_on_its_row() {
+    let text = "日本語のリスト項目がとても長くてテキストが続きます";
+    for (src, head) in [
+        (format!("- {text}\n"), "• 日"),
+        (format!("> {text}\n"), "▎ 日"),
+        (format!("Note: {text}\n"), "Note: 日"),
+    ] {
+        let (rows, _) = paint_rows(&src, 24, None);
+        assert!(rows[0].starts_with(head), "{rows:?} in {src:?}");
+    }
+}
+
+/// A code line wider than the viewport with no break point of its own starts on its first row
+/// (issue #58): the only break used to be the pad cell, which left a blank row above the text.
+#[test]
+fn a_long_code_line_starts_on_its_first_row() {
+    for src in [
+        "```\nabcdefghijklmnopqrstuvwxyz0123456789\n```\n",
+        "```\n日本語のコードはとても長い行になります\n```\n",
+    ] {
+        let (rows, _) = paint_rows(src, 20, None);
+        // The fence row, then the line's rows; the closing fence row is blank and dropped.
+        assert!(
+            rows.len() > 2 && rows[1..].iter().all(|r| !r.trim().is_empty()),
+            "{rows:?} in {src:?}"
+        );
+    }
+}
+
 /// A wrapped row's continuation rows start where the renderer drew its text, never where its
 /// text merely looks like it starts (issue #71): a footnote hangs under the text past its leader,
 /// numeric or named, and a paragraph opening with an escaped marker doesn't hang at all, at top

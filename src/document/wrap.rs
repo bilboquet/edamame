@@ -6,9 +6,9 @@
 
 use ratatui::style::Style;
 use ratatui::text::Line;
-use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
 
+use crate::markdown::table_layout::{self, is_no_break_char, Joint};
 use crate::markdown::RowOrigin;
 
 /// Display width of `ch` in terminal cells (0 for control chars).  Shared by the renderer
@@ -112,43 +112,44 @@ fn absorbed_next_start(chars: &[(char, Style)], end: usize) -> usize {
 
 // ── Grapheme clusters ─────────────────────────────────────────────────────
 
-/// Mask over `0..=chars.len()` marking grapheme-cluster starts (the past-the-end index is
-/// always a boundary).
+/// The [`Joint`] before each index of `chars`, over `0..=chars.len()`: inside a grapheme cluster,
+/// between two, or beside a wide glyph ([`table_layout::joints`], the rule the table wrap uses).
 ///
 /// A row must never end mid-cluster: the terminal draws a cluster as one glyph, and a ZWJ
 /// is an ordinary break candidate under "anything non-alphanumeric", so an emoji family
-/// would otherwise be split across rows.
+/// would otherwise be split across rows.  And CJK has no spaces between words, so a row may
+/// end beside any wide glyph (a [`Joint::Glyph`]), or a list marker or quote bar before a
+/// long CJK run would end up on a row of its own.
 ///
-/// `None` on the all-ASCII fast path.  It matters: this sits on the per-keystroke
-/// navigation path as well as the paint path, and segmenting allocates.
-fn cluster_starts(chars: &[(char, Style)]) -> Option<Vec<bool>> {
+/// `None` on the all-ASCII fast path, where every joint is a cluster boundary.  It matters:
+/// this sits on the per-keystroke navigation path as well as the paint path, and segmenting
+/// allocates.
+fn joints_of(chars: &[(char, Style)]) -> Option<Vec<Joint>> {
     if chars.iter().all(|(ch, _)| ch.is_ascii()) {
         return None;
     }
-    let text: String = chars.iter().map(|(ch, _)| *ch).collect();
-    // Consumers address text by char index, so carry a running char count rather than
-    // materializing a byte→char table.
-    let mut starts = vec![false; chars.len() + 1];
-    let mut char_idx = 0usize;
-    for cluster in UnicodeSegmentation::graphemes(text.as_str(), true) {
-        starts[char_idx] = true;
-        char_idx += cluster.chars().count();
-    }
-    starts[chars.len()] = true;
-    Some(starts)
+    let text: String = chars.iter().map(|&(ch, _)| ch).collect();
+    Some(table_layout::joints_in_str(&text, chars.len()))
 }
 
-/// Is char index `i` a cluster boundary?  `None` (the all-ASCII path) means every one is.
-fn is_cluster_boundary(clusters: Option<&[bool]>, i: usize) -> bool {
-    clusters.is_none_or(|starts| starts.get(i).copied().unwrap_or(true))
+/// The joint before char index `i`.  `None` (the all-ASCII path) means a plain cluster boundary.
+fn joint_at(joints: Option<&[Joint]>, i: usize) -> Joint {
+    joints.map_or(Joint::Cluster, |j| {
+        j.get(i).copied().unwrap_or(Joint::Cluster)
+    })
+}
+
+/// Is char index `i` a cluster boundary?
+fn is_cluster_boundary(joints: Option<&[Joint]>, i: usize) -> bool {
+    joint_at(joints, i) != Joint::Inside
 }
 
 /// Pull `end` back to the nearest cluster boundary so a hard break can't sever a cluster.
 /// Never returns `start` — a row holding one over-wide cluster must still make progress,
 /// and the renderer clips the overflow.
-fn snap_to_cluster_boundary(clusters: Option<&[bool]>, start: usize, end: usize) -> usize {
+fn snap_to_cluster_boundary(joints: Option<&[Joint]>, start: usize, end: usize) -> usize {
     let mut snapped = end;
-    while snapped > start && !is_cluster_boundary(clusters, snapped) {
+    while snapped > start && !is_cluster_boundary(joints, snapped) {
         snapped -= 1;
     }
     if snapped == start {
@@ -159,22 +160,6 @@ fn snap_to_cluster_boundary(clusters: Option<&[bool]>, start: usize, end: usize)
 }
 
 // ── Wrap break candidates ─────────────────────────────────────────────────
-
-/// Non-alphanumeric characters that still carry no wrap break.  A no-break space is
-/// *defined* that way, and code blocks pad blank lines with U+00A0 — breaking there would
-/// split padding emitted precisely to keep a row intact.
-fn is_no_break_char(ch: char) -> bool {
-    matches!(ch, '\u{a0}' | '\u{202f}' | '\u{2060}' | '\u{feff}')
-}
-
-/// Unambiguous opening delimiters.  Breaking *after* one strands it alone at
-/// the row's right edge, away from the phrase it opens.
-fn is_opening_delimiter(ch: char) -> bool {
-    matches!(
-        ch,
-        '(' | '[' | '{' | '\u{201c}' | '\u{2018}' | '\u{ab}' | '\u{bf}' | '\u{a1}'
-    )
-}
 
 /// Punctuation that binds a token when it sits *between* two alphanumerics: contractions,
 /// decimals, clock times, file names, `snake_case`.  Outside that sandwich the same
@@ -188,27 +173,45 @@ fn is_intra_word_punctuation(ch: char) -> bool {
 }
 
 /// May a visual row end with `chars[i]`?  The base rule is "anything non-alphanumeric",
-/// with three refinements keeping tokens and punctuation pairs intact, over a
-/// grapheme-cluster gate no refinement can override.  Both neighbors matter, hence the
-/// slice rather than a lone `char`.
-fn is_break_after(chars: &[(char, Style)], i: usize, clusters: Option<&[bool]>) -> bool {
+/// plus a break beside a wide glyph ([`Joint::Glyph`]), with refinements keeping tokens and
+/// punctuation pairs intact, under a grapheme-cluster gate nothing can override.  Both
+/// neighbors matter, hence the slice rather than a lone `char`.
+fn is_break_after(chars: &[(char, Style)], i: usize, joints: Option<&[Joint]>) -> bool {
     // Only a break when the next char opens a new cluster; otherwise `i` sits inside one
     // and the row would end mid-glyph.
-    if !is_cluster_boundary(clusters, i + 1) {
+    let joint = joint_at(joints, i + 1);
+    if joint == Joint::Inside {
         return false;
     }
     let ch = chars[i].0;
-    if ch.is_alphanumeric() || is_no_break_char(ch) {
+    let next = chars.get(i + 1).map(|&(c, _)| c);
+    // A no-break space or word joiner binds both neighbors, wide glyphs included.
+    if is_no_break_char(ch) || next.is_some_and(is_no_break_char) {
+        return false;
+    }
+    // Closing punctuation never starts a row, nor does an opening one end it with its text
+    // still to come: `。` and `」` stay with the glyph before them, `「` and `(` with the
+    // one after.
+    if next.is_some_and(table_layout::no_break_before) {
+        return false;
+    }
+    if table_layout::no_break_after(ch) && next.is_some_and(|c| !c.is_whitespace()) {
+        return false;
+    }
+    // Beside a wide glyph: as good as a space (`table_layout::joints` already left out
+    // the joints punctuation binds).
+    if joint == Joint::Glyph {
+        return true;
+    }
+    if ch.is_alphanumeric() {
         return false;
     }
     let prev_alnum = i > 0 && chars[i - 1].0.is_alphanumeric();
-    let next_alnum = chars.get(i + 1).is_some_and(|(c, _)| c.is_alphanumeric());
+    let next_alnum = next.is_some_and(char::is_alphanumeric);
 
-    if is_opening_delimiter(ch) && next_alnum {
-        return false;
-    }
-    // `"` and `'` are ambiguous: opening when a word follows and none precedes.
-    if matches!(ch, '"' | '\'') && next_alnum && !prev_alnum {
+    // `"`, `'` and `’` are ambiguous: opening (or eliding, `’90s`) when a word follows and
+    // none precedes.
+    if table_layout::is_ambiguous_quote(ch) && next_alnum && !prev_alnum {
         return false;
     }
     if is_intra_word_punctuation(ch) && prev_alnum && next_alnum {
@@ -300,8 +303,8 @@ pub fn visual_rows_of_chars(
     }
     let indent = indent.at(width);
 
-    let clusters = cluster_starts(chars);
-    let clusters = clusters.as_deref();
+    let joints = joints_of(chars);
+    let joints = joints.as_deref();
 
     let mut start = 0;
     let mut row_idx = 0usize;
@@ -319,27 +322,49 @@ pub fn visual_rows_of_chars(
             (chars.len(), chars.len())
         } else {
             // Pull the budget back so a hard break falls between clusters, not inside one.
-            let window_end = snap_to_cluster_boundary(clusters, start, start + n_chars);
-            let break_at = (start..window_end)
-                .rev()
-                .find(|&i| is_break_after(chars, i, clusters));
+            let window_end = snap_to_cluster_boundary(joints, start, start + n_chars);
+            // A row never ends on whitespace alone: a break after a leading pad (a code
+            // row's pad cell, an indented raw line) before a word too long to fit would
+            // leave a blank row and fit nothing more on the next, so that word hard-breaks
+            // instead.
+            let ink = (start..window_end).find(|&i| !chars[i].0.is_whitespace());
+            // A window ending on a wide glyph with a space right past it fills the row, and
+            // the break absorbs the space; otherwise the glyph break before that last glyph
+            // would win and send it down alone.  (An ASCII word ending exactly at the edge
+            // still goes down a row: filling the row would absorb the space after it, and a
+            // reveal that re-wraps the row could then put a click on that cell-less space.)
+            let edge_space = chars[window_end].0 == ' '
+                && chars[start..window_end]
+                    .iter()
+                    .rev()
+                    .find(|&&(c, _)| char_cells(c) > 0)
+                    .is_some_and(|&(c, _)| char_cells(c) > 1);
+            let break_at = if edge_space {
+                None
+            } else {
+                ink.and_then(|ink| {
+                    (ink..window_end)
+                        .rev()
+                        .find(|&i| is_break_after(chars, i, joints))
+                })
+            };
 
             let end = match break_at {
                 Some(bp) => {
                     // Back up past a stranded one-letter word so it goes down with its
                     // noun.
                     let bp = if ends_with_lone_word(chars, start, bp) {
-                        (start..bp - 1)
+                        (ink.unwrap_or(start)..bp - 1)
                             .rev()
-                            .find(|&i| is_break_after(chars, i, clusters))
+                            .find(|&i| is_break_after(chars, i, joints))
                             .unwrap_or(bp)
                     } else {
                         bp
                     };
                     bp + 1
                 }
-                // Nothing in the window carries a break: one long word or over-wide
-                // cluster.
+                // The window ends at a space, or nothing in it carries a break: one long
+                // word or over-wide cluster.
                 None => window_end,
             };
             (end, absorbed_next_start(chars, end))
@@ -559,11 +584,11 @@ mod tests {
     /// absorbed nowhere.
     #[test]
     fn unwrapped_cell_positions_follow_the_wrap() {
-        let painted = PaintedRows::new(&Line::from("ab 日 cd"), Indent::hanging(1), 5);
+        let painted = PaintedRows::new(&Line::from("abc 日 de"), Indent::hanging(1), 5);
         assert_eq!(
             painted.rows,
-            vec![(0, 3, 3), (3, 5, 5), (5, 7, 7)],
-            "`ab ` / ` 日 ` / ` cd`"
+            vec![(0, 4, 4), (4, 6, 6), (6, 8, 8)],
+            "`abc ` / ` 日 ` / ` de`"
         );
         assert_eq!(
             painted.unwrapped_cell_positions(),
@@ -571,6 +596,7 @@ mod tests {
                 Some((0, 0)),
                 Some((0, 1)),
                 Some((0, 2)),
+                Some((0, 3)),
                 Some((1, 1)),
                 Some((1, 2)),
                 Some((1, 3)),
@@ -870,6 +896,77 @@ mod tests {
         }
     }
 
+    /// CJK has no spaces between words, so a row breaks between any two wide glyphs: a list
+    /// marker keeps the run's first glyphs on its row instead of going alone onto a row of its
+    /// own (issue #58), and the run fills each row.
+    #[test]
+    fn cjk_breaks_between_any_two_glyphs() {
+        let rows = visual_rows_of_str("- 日本語のリスト項目", 8);
+        assert_eq!(rows[0], (0, 5, 5), "`- 日本語` fills the first row");
+        assert_eq!(rows[1], (5, 9, 9));
+    }
+
+    /// Closing punctuation never starts a row and opening punctuation never ends one, so a
+    /// row of CJK punctuation alone can't form either.
+    #[test]
+    fn cjk_punctuation_stays_with_the_glyph_it_belongs_to() {
+        let text = "あいうえお。かきくけこ「さしすせ」たちつてと";
+        let chars: Vec<char> = text.chars().collect();
+        for width in 4..=12 {
+            for (start, end, _) in visual_rows_of_str(text, width) {
+                let row: String = chars[start..end].iter().collect();
+                assert!(
+                    !row.starts_with(['。', '」']) && !row.ends_with('「'),
+                    "row {row:?} at width {width}"
+                );
+            }
+        }
+    }
+
+    /// A word joiner (or BOM used as one) binds the glyphs on both sides: no row starts with it.
+    #[test]
+    fn a_word_joiner_between_wide_glyphs_is_never_a_break() {
+        for joiner in ['\u{2060}', '\u{feff}'] {
+            let text = format!("日本{joiner}語本");
+            let rows = visual_rows_of_str(&text, 4);
+            let chars: Vec<char> = text.chars().collect();
+            assert!(
+                rows.iter().all(|&(s, e, _)| {
+                    !chars[s..e].starts_with(&[joiner]) && !chars[s..e].ends_with(&[joiner])
+                }),
+                "{rows:?} in {text:?}"
+            );
+        }
+    }
+
+    /// A straight quote beside CJK stays with the glyph it wraps instead of going alone onto a
+    /// row, and an elided `’` stays with its word.
+    #[test]
+    fn quotes_stay_with_the_text_beside_them() {
+        let rows = visual_rows_of_str("'日本語'", 7);
+        assert_eq!(rows, vec![(0, 3, 3), (3, 5, 5)], "`'日本` / `語'`");
+        let rows = visual_rows_of_str("あいう ’90s", 8);
+        assert_eq!(rows, vec![(0, 4, 4), (4, 8, 8)], "`あいう ` / `’90s`");
+    }
+
+    /// A glyph that fills the window with a space right past it keeps its row: the glyph break
+    /// before it doesn't send it down alone, and the break absorbs the space.
+    #[test]
+    fn a_wide_glyph_at_the_edge_before_a_space_keeps_its_row() {
+        let rows = visual_rows_of_str("一二三四五 klm", 10);
+        assert_eq!(rows[0], (0, 5, 6));
+    }
+
+    /// A row never ends on whitespace alone: a word too long for the row after a leading pad
+    /// (a code row's pad cell) hard-breaks rather than leave a blank row above it.
+    #[test]
+    fn a_leading_pad_is_never_a_row_of_its_own() {
+        let rows = visual_rows_of_str(" abcdefghij", 5);
+        assert_eq!(rows[0], (0, 5, 5));
+        let rows = visual_rows_of_str(" 日本語のコードは", 8);
+        assert_eq!(rows[0], (0, 4, 4), "` 日本語` fills the first row");
+    }
+
     #[test]
     fn a_cluster_wider_than_the_row_still_makes_progress() {
         // The wrap must fall back to a hard break rather than loop on an empty row.
@@ -887,7 +984,7 @@ mod tests {
             .chars()
             .map(|c| (c, Style::default()))
             .collect();
-        assert!(cluster_starts(&chars).is_none());
+        assert!(joints_of(&chars).is_none());
     }
 
     // ── Cell-width awareness ──────────────────────────────────────

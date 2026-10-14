@@ -1049,6 +1049,38 @@ fn check_revealed_on_every_line(src: &str) {
     }
 }
 
+/// A wide glyph that ends a row with a space right past it fills the row, and the break absorbs
+/// the space (issue #58).  An ASCII word at the edge goes down a row instead, because a reveal
+/// that re-wraps such a row could land a click on the absorbed, cell-less space.  This checks
+/// that the CJK rule doesn't: with markup the reveal shows or hides, so the raw and rendered rows
+/// wrap differently, every click lands where the cursor then shows, from cursors at the line's
+/// start, middle and end, at each width from wrapping hard to nearly fitting.
+#[test]
+fn a_wide_glyph_filling_a_revealed_row_keeps_clicks_where_the_cursor_shows() {
+    let cases = [
+        "一二三四五 *klm* nop qrs\n",
+        "**日本語** の *テキスト* です end\n",
+        "- 一二三 **四五** six seven\n",
+        "> 日本 `code` 語 x 文字 z\n",
+        "Note: **一二三四** five six\n",
+    ];
+    std::thread::scope(|scope| {
+        for src in cases {
+            scope.spawn(move || {
+                let line = src.trim_end();
+                let mid = line.char_indices().nth(line.chars().count() / 2).unwrap().0;
+                for width in 8..=16 {
+                    for at in [0, mid, line.len()] {
+                        check_click_and_paint_from(src, width, Some(at)).unwrap_or_else(|e| {
+                            panic!("width {width}, cursor at {at}: {e}\nin {src:?}")
+                        });
+                    }
+                }
+            });
+        }
+    });
+}
+
 /// A revealed cell of a table that wraps (issue #69).  A table too wide for the viewport wraps
 /// its rows on screen, and the cell's raw text must paint where that wrap put each cell, not at
 /// its unwrapped column, which put it on the row above or past the right edge.  A column

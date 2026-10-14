@@ -19,7 +19,7 @@ use super::ast::{inlines_to_plain, to_u32, Block, Inline, LineSpan, MetadataKind
 use super::highlight::{self, Token};
 use super::render_cache::{is_cache_worthy, CachedRows, RenderCache, RenderSettings};
 use super::row_origin::{ContentKind, RowOrigin, RowSink};
-use super::table_layout::str_cells;
+use super::table_layout::{self, str_cells};
 
 const IMAGE_PREFIX: &str = "Image: ";
 
@@ -889,9 +889,9 @@ impl<'t> Renderer<'t> {
         let row_tokens = |i: usize| tokens.get(i).map(Vec::as_slice).unwrap_or(&[]);
 
         if self.code_wrap {
-            // Chars per row: the viewport less the pad cell, and at least one, or a one-cell
+            // Cells per row: the viewport less the pad cell, and at least one, or a one-cell
             // viewport would never advance.
-            let chunk = self.width().saturating_sub(1).max(1);
+            let chunk = self.width().saturating_sub(CODE_PAD_COLS).max(1);
             for (i, line) in raw_lines.iter().enumerate() {
                 let chars: Vec<char> = line.chars().collect();
                 if chars.is_empty() {
@@ -904,17 +904,17 @@ impl<'t> Renderer<'t> {
                     );
                     continue;
                 }
-                let mut start = 0;
-                while start < chars.len() {
-                    let end = (start + chunk).min(chars.len());
-                    let slice: String = chars[start..end].iter().collect();
+                // Split by cells, between grapheme clusters: a row of wide glyphs holds half
+                // as many chars, and a cluster never straddles two rows.
+                for range in table_layout::hard_wrap_ranges(&chars, chunk) {
+                    let (start, end) = (range.start, range.end);
+                    let slice: String = chars[range].iter().collect();
                     // Tokens address the whole source line, so each segment
                     // takes the overlapping part re-based to its own column 0.
                     let seg = highlight::slice_tokens(row_tokens(i), start, end);
                     let row = self.code_body_row(&slice, &seg, block_width);
                     let origin = body_origin(i, start).hung_under_indent(&row);
                     out.push(row, origin);
-                    start = end;
                 }
             }
         } else {
@@ -2272,6 +2272,35 @@ mod tests {
                 .expect("the code row");
             assert_eq!(str_cells(&plain_text(body)), 20, "in {src:?}");
         }
+    }
+
+    /// `code_wrap` splits a line by cells, between grapheme clusters: a row of wide glyphs holds
+    /// half as many chars, and a combining mark stays with its base char.
+    #[test]
+    fn code_wrap_splits_by_cells_between_clusters() {
+        let blocks = parse("```\n日本語のコードはとても長い行\n```\n");
+        let lines = renderer()
+            .with_viewport_width(10)
+            .with_code_wrap(true)
+            .render(&blocks);
+        let body: Vec<String> = lines
+            .iter()
+            .map(plain_text)
+            .filter(|t| t.chars().any(|c| !c.is_whitespace()))
+            .collect();
+        assert_eq!(body.len(), 4, "{body:?}");
+        assert!(body.iter().all(|t| str_cells(t) == 10), "{body:?}");
+
+        let e = "e\u{301}";
+        let blocks = parse(&format!("```\n{}\n```\n", e.repeat(12)));
+        let lines = renderer()
+            .with_viewport_width(10)
+            .with_code_wrap(true)
+            .render(&blocks);
+        assert!(
+            lines.iter().all(|l| !plain_text(l).starts_with(" \u{301}")),
+            "a row starts with a stranded accent"
+        );
     }
 
     #[test]
