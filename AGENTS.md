@@ -289,7 +289,8 @@ src/
   test_env.rs       # #[cfg(test)] only — crate-wide env_lock() + EnvGuard
 
 tests/              # diagrams, search, editing, footnotes, list_edit, mouse, palette,
-                    #   renderer, row_provenance, source_map, table, ui; doc_links
+                    #   renderer, row_provenance, source_map, table, ui; heading_anchors
+                    #   (slugs vs. GitHub's, from fixtures/github_anchors.tsv); doc_links
                     #   (every relative link in the repo's Markdown resolves);
                     #   snapshots/ and fixtures/; support/markdown_gen.rs (shared
                     #   proptest document generator)
@@ -487,6 +488,7 @@ Use `tracing` macros — **never** `println!` / `eprintln!`, which would corrupt
 | `dirs` | Platform paths (XDG_CONFIG_HOME etc.) |
 | `tracing` (+ appender, subscriber) | Structured logging (dev mode only) |
 | `unicode-width`, `unicode-segmentation` | Grapheme and column measurement |
+| `unicode-properties` | General Category for GitHub-compatible heading slugs (already in the tree via `rustybuzz`) |
 | `arboard` | OS clipboard (feature-gated `clipboard`; Wayland data-control on) |
 | `ratatui-image` | Image-protocol probing and rendering |
 | `image` | PNG/JPEG/GIF/BMP/WEBP decoding |

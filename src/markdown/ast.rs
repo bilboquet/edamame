@@ -340,6 +340,10 @@ pub enum Inline {
     Highlight(Vec<Inline>),
     /// Mid-paragraph HTML comment, stored with delimiters; renders as zero spans.
     HtmlComment(String),
+    /// Any other inline HTML (a tag such as `<span>`), kept as its source and rendered exactly
+    /// like [`Text`](Self::Text).  Distinct only so a heading slug can drop it, as GitHub's
+    /// does: `# a <b>x</b>` is `#a-x`, while an escaped `\<b>` stays text and keeps its `b`.
+    Html(String),
     /// A footnote reference (`[^label]`). Always has a definition: pulldown-cmark leaves an
     /// undefined `[^x]` as literal text. See `docs/dev/footnotes.md` for marker rendering.
     FootnoteReference {
@@ -367,18 +371,34 @@ pub fn heading_plain_text(inlines: &[Inline]) -> String {
 /// Flatten inlines to a plain text string (no styling).
 pub fn inlines_to_plain(inlines: &[Inline]) -> String {
     let mut out = String::new();
+    push_plain(inlines, false, &mut out);
+    out
+}
+
+/// The text GitHub slugs a heading from: [`inlines_to_plain`] less what isn't the heading's
+/// text content (image alt text, inline HTML tags), and with a soft break as the newline it
+/// is rather than a space, so it drops out of the slug instead of becoming a `-` (a setext
+/// `Foo` / `bar` heading is `#foobar`).
+pub fn heading_slug_text(inlines: &[Inline]) -> String {
+    let mut out = String::new();
+    push_plain(inlines, true, &mut out);
+    out
+}
+
+fn push_plain(inlines: &[Inline], for_slug: bool, out: &mut String) {
     for inline in inlines {
         match inline {
             Inline::Text(t) => out.push_str(t),
+            Inline::Html(h) if !for_slug => out.push_str(h),
+            Inline::Html(_) => {}
             Inline::Bold(inner)
             | Inline::Italic(inner)
             | Inline::Strikethrough(inner)
-            | Inline::Highlight(inner) => {
-                out.push_str(&inlines_to_plain(inner));
-            }
+            | Inline::Highlight(inner) => push_plain(inner, for_slug, out),
             Inline::Code(c) => out.push_str(c),
-            Inline::Link { text, .. } => out.push_str(&inlines_to_plain(text)),
-            Inline::Image { alt, .. } => out.push_str(alt),
+            Inline::Link { text, .. } => push_plain(text, for_slug, out),
+            Inline::Image { alt, .. } if !for_slug => out.push_str(alt),
+            Inline::Image { .. } => {}
             Inline::HtmlComment(_) => {}
             // Footnote markers are chrome, not prose: keep them out of heading slugs.
             Inline::FootnoteReference { .. } => {}
@@ -390,16 +410,35 @@ pub fn inlines_to_plain(inlines: &[Inline]) -> String {
                 out.push_str(source);
                 out.push_str(delim);
             }
-            Inline::SoftBreak => out.push(' '),
+            Inline::SoftBreak => out.push(if for_slug { '\n' } else { ' ' }),
             Inline::HardBreak => out.push('\n'),
         }
     }
-    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The slug text leaves out what GitHub's heading text content doesn't hold, and keeps a
+    /// line break a newline; the display text keeps all of it.
+    #[test]
+    fn heading_slug_text_drops_alt_text_and_markup() {
+        let inlines = [
+            Inline::Text("a ".into()),
+            Inline::Image {
+                alt: "alt".into(),
+                url: "x.png".into(),
+            },
+            Inline::Html("<b>".into()),
+            Inline::Bold(vec![Inline::Text("b".into())]),
+            Inline::Html("</b>".into()),
+            Inline::SoftBreak,
+            Inline::Text("c".into()),
+        ];
+        assert_eq!(inlines_to_plain(&inlines), "a alt<b>b</b> c");
+        assert_eq!(heading_slug_text(&inlines), "a b\nc");
+    }
 
     /// Every line of each shape, read back through the accessors.
     fn round_trip(cols: &[Option<u32>]) -> SrcLines {

@@ -293,6 +293,7 @@ fn collect_link_runs_from_inlines(inlines: &[Inline], out: &mut Vec<LinkRun>) {
             }
             Inline::Text(_)
             | Inline::Code(_)
+            | Inline::Html(_)
             | Inline::HtmlComment(_)
             | Inline::FootnoteReference { .. }
             | Inline::Math { .. }

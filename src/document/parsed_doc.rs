@@ -2,7 +2,9 @@ use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
 use std::ops::Range;
 
+use percent_encoding::percent_decode_str;
 use ratatui::text::Line;
+use unicode_properties::{GeneralCategory as Gc, GeneralCategoryGroup, UnicodeGeneralCategory};
 
 use crate::config::Theme;
 use crate::diagram::DiagramSource;
@@ -12,7 +14,7 @@ use crate::document::wrap::Indent;
 use crate::document::SourceMap;
 use crate::markdown::ast::to_u32;
 use crate::markdown::{
-    attach_nested_tui_columns_comments, inlines_to_plain, parse_document,
+    attach_nested_tui_columns_comments, heading_slug_text, parse_document,
     promote_diagram_code_blocks, promote_display_math_paragraphs, promote_html_comments,
     promote_image_paragraphs, reconstruct_broken_display_math, split_display_math_paragraphs,
     Block, ImageRowOverride, RefLabels, RenderCache, Renderer, RowOrigin,
@@ -75,9 +77,9 @@ pub struct ParsedDoc {
     /// Every `Block::ImageBlock`, in document order, so the decode-dispatch scan and the
     /// paint pass don't each walk the block list.
     pub image_blocks: Vec<ImageBlockInfo>,
-    /// GFM-slug → rendered-line index for every heading; `LinkTarget::Anchor` dispatches
-    /// against it.  Slugs are lowercased, stripped to `[a-z0-9 -]`, whitespace runs
-    /// become `-`, and collisions take a `-N` suffix.
+    /// [`gfm_slug`] → rendered-line index for every top-level heading, collisions suffixed by
+    /// [`uniquify_slug`].  Read through [`heading_line`](Self::heading_line).  A heading with
+    /// an empty slug takes its count but no entry, so `#` can't name it.
     pub heading_anchors: HashMap<String, usize>,
     /// Label → rendered-line index for every footnote definition, the footnote analogue of
     /// [`heading_anchors`](Self::heading_anchors).  The key is the raw label as written,
@@ -332,12 +334,13 @@ impl ParsedDoc {
                 });
             }
             if let Block::Heading { inlines, .. } = &blocks[i] {
-                let plain = inlines_to_plain(inlines);
-                let base_slug = gfm_slug(&plain);
-                let slug = uniquify_slug(&base_slug, &mut anchor_counts);
+                let slug =
+                    uniquify_slug(&gfm_slug(&heading_slug_text(inlines)), &mut anchor_counts);
                 // `lines.len()` is where this heading's first line will land, since the
                 // block's own lines are pushed below.
-                heading_anchors.insert(slug, lines.len());
+                if !slug.is_empty() {
+                    heading_anchors.insert(slug, lines.len());
+                }
             }
             if let Block::FootnoteDefinition { label, .. } = &blocks[i] {
                 footnote_anchors.insert(label.clone(), lines.len());
@@ -507,6 +510,24 @@ impl ParsedDoc {
     /// See [`ref_labels`](Self::ref_labels).
     pub fn ref_labels(&self) -> &RefLabels {
         &self.ref_labels
+    }
+
+    /// Rendered-line index of the heading a link's `#fragment` names, the one resolver every
+    /// link path and doc-link test goes through.  Matched exactly against
+    /// [`heading_anchors`](Self::heading_anchors) once percent-decoded as a browser decodes it:
+    /// a link copied from GitHub names `# 日本語` as `#%E6%97%A5%E6%9C%AC%E8%AA%9E`.  No slug
+    /// holds a `%`, so decoding can't turn one that matched into one that doesn't.  An empty
+    /// fragment is the top of the document, as in a browser.
+    ///
+    /// Otherwise deliberately no leniency — no slugifying `#Getting Started`, no case folding:
+    /// a fragment that resolved only here would be a link the author ships broken everywhere
+    /// else without ever seeing it fail.
+    pub fn heading_line(&self, fragment: &str) -> Option<usize> {
+        if fragment.is_empty() {
+            return Some(0);
+        }
+        let decoded = percent_decode_str(fragment).decode_utf8_lossy();
+        self.heading_anchors.get(&*decoded).copied()
     }
 
     /// See [`per_block_own`](Self::per_block_own).
@@ -712,38 +733,52 @@ impl ParsedDoc {
     }
 }
 
-/// GitHub Flavored Markdown slug: lowercase, drop anything outside `[a-z0-9 -]`, collapse
-/// whitespace runs to a single `-`.  Leading / trailing dashes are preserved (as GFM
-/// does), and an empty slug is returned as-is for the caller to handle.
+/// GitHub's heading slug: lowercase, keep word characters in any script (see
+/// [`is_slug_char`]) plus `-`, drop everything else, and turn *each* space into a `-` (no
+/// collapsing, so `a  b` is `a--b`).  Leading / trailing dashes are preserved, and an empty
+/// slug is returned as-is for the caller to handle.
 pub fn gfm_slug(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut prev_ws = false;
-    for ch in text.chars().flat_map(|c| c.to_lowercase()) {
-        if ch.is_whitespace() {
-            if !prev_ws {
-                out.push('-');
-            }
-            prev_ws = true;
-            continue;
-        }
-        prev_ws = false;
-        if ch.is_ascii_alphanumeric() || ch == '-' {
-            out.push(ch);
-        }
-    }
-    out
+    // Per char, not `str::to_lowercase`: GitHub lowers a word-final `Σ` to `σ`, not `ς`.
+    text.chars()
+        .flat_map(char::to_lowercase)
+        .filter_map(|ch| match ch {
+            ' ' => Some('-'),
+            _ if is_slug_char(ch) => Some(ch),
+            _ => None,
+        })
+        .collect()
 }
 
-/// Append a `-N` suffix on collision, matching GitHub: first use is `base`, then `base-1`,
-/// `base-2`.  `counts` carries the per-base tally across calls.
+/// Does `ch` survive into a [`gfm_slug`]?  GitHub keeps `-` and the Unicode word characters
+/// (UTS #18 `\w`): `Alphabetic` code points (every letter and letter number, plus symbols
+/// such as `Ⓐ`), marks, decimal digits, connector punctuation (`_`), and the zero-width
+/// joiner and non-joiner Persian and Indic text rely on.  Other numbers (`²`, `①`), symbols,
+/// punctuation, separators other than the space, and other format characters are dropped.
+fn is_slug_char(ch: char) -> bool {
+    matches!(ch, '-' | '\u{200C}' | '\u{200D}')
+        || ch.is_alphabetic()
+        || ch.general_category_group() == GeneralCategoryGroup::Mark
+        || matches!(
+            ch.general_category(),
+            Gc::DecimalNumber | Gc::ConnectorPunctuation
+        )
+}
+
+/// Append a `-N` suffix on collision, as GitHub does: first use is `base`, then
+/// `base-1`, `base-2`.  Every slug handed out is taken too, so a heading whose own slug is
+/// `base-1` doesn't reuse an earlier suffixed one: `Echo`, `Echo`, `Echo 1` give `echo`,
+/// `echo-1`, `echo-1-1`.  `counts` maps every slug handed out to the last suffix issued with
+/// it as a base.
 pub(crate) fn uniquify_slug(base: &str, counts: &mut HashMap<String, usize>) -> String {
-    let entry = counts.entry(base.to_owned()).or_insert(0);
-    let slug = if *entry == 0 {
-        base.to_owned()
-    } else {
-        format!("{base}-{}", *entry)
-    };
-    *entry += 1;
+    let mut slug = base.to_owned();
+    while counts.contains_key(&slug) {
+        let n = counts
+            .get_mut(base)
+            .expect("`base` is taken once any suffix is");
+        *n += 1;
+        slug = format!("{base}-{n}");
+    }
+    counts.insert(slug.clone(), 0);
     slug
 }
 
@@ -1402,11 +1437,64 @@ mod tests {
     fn gfm_slug_basic_cases() {
         assert_eq!(gfm_slug("Hello, World!"), "hello-world");
         assert_eq!(gfm_slug("Foo"), "foo");
-        assert_eq!(gfm_slug("  spaces   here  "), "-spaces-here-");
-        // The three letters are stripped, leaving two whitespace runs and so two dashes.
-        assert_eq!(gfm_slug("α β γ"), "--");
+        // Each space is its own dash: GitHub collapses nothing.
+        assert_eq!(gfm_slug("  spaces   here  "), "--spaces---here--");
+        assert_eq!(gfm_slug("a  b"), "a--b");
         assert_eq!(gfm_slug("API v2 — Release Notes"), "api-v2--release-notes");
         assert_eq!(gfm_slug("Hello World"), "hello-world");
+        assert_eq!(
+            gfm_slug("snake_case and kebab-case"),
+            "snake_case-and-kebab-case"
+        );
+    }
+
+    /// Expected values are the anchors GitHub renders (checked through its Markdown API), for
+    /// the cases issue #59 lists and the category edges `is_slug_char` decides.
+    #[test]
+    fn gfm_slug_keeps_letters_in_every_script() {
+        for (heading, slug) in [
+            ("日本語", "日本語"),
+            ("日本語 見出し", "日本語-見出し"),
+            ("한국어 제목", "한국어-제목"),
+            ("Café au lait", "café-au-lait"),
+            ("α β γ", "α-β-γ"),
+            ("Ｆｕｌｌ", "ｆｕｌｌ"),
+            // A decomposed accent is a mark, so it stays with its letter.
+            ("Cafe\u{301}", "cafe\u{301}"),
+            // Every `Σ` lowers to `σ`, word-final ones too.
+            ("ΟΔΟΣ", "οδοσ"),
+            // `İ` lowers to `i` plus a combining dot, which is a mark and stays.
+            ("İstanbul", "i\u{307}stanbul"),
+            // The joiners are kept, other format characters (soft hyphen, word joiner) dropped.
+            ("a\u{200C}b\u{200D}c", "a\u{200C}b\u{200D}c"),
+            ("a\u{AD}b\u{2060}c", "abc"),
+            // CJK punctuation, symbols and other numbers go; `Ⓐ` is alphabetic and stays.
+            ("見出し、その「一」", "見出しその一"),
+            ("x² ① ★ Ⓐ", "x---ⓐ"),
+            // Only U+0020 becomes a dash: a tab or no-break space is dropped.
+            ("a\tb\u{a0}c", "abc"),
+            ("Rust 🦀 tips", "rust--tips"),
+        ] {
+            assert_eq!(gfm_slug(heading), slug, "slug of {heading:?}");
+        }
+    }
+
+    #[test]
+    fn heading_anchors_key_non_ascii_headings_apart() {
+        let doc = ParsedDoc::build("# 日本語\n\n# 中文\n\n# 한국어\n", theme(), true, 24);
+        let mut keys: Vec<&str> = doc.heading_anchors.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["中文", "日本語", "한국어"]);
+    }
+
+    /// A line break inside a heading drops out of its slug, as on GitHub, rather than becoming
+    /// a `-`: GitHub's heading text holds the newline, and only a space turns into a dash.
+    #[test]
+    fn a_line_break_in_a_heading_drops_out_of_its_slug() {
+        let doc = ParsedDoc::build("Foo\nbar\n===\n\nbaz\\\nqux\n---\n", theme(), true, 24);
+        let mut keys: Vec<&str> = doc.heading_anchors.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["bazqux", "foobar"]);
     }
 
     #[test]
@@ -1416,6 +1504,18 @@ mod tests {
         assert_eq!(uniquify_slug("foo", &mut counts), "foo-1");
         assert_eq!(uniquify_slug("foo", &mut counts), "foo-2");
         assert_eq!(uniquify_slug("bar", &mut counts), "bar");
+    }
+
+    /// A slug another heading already holds as its suffixed form counts as taken, as in
+    /// GitHub: two headings must never share an anchor.
+    #[test]
+    fn uniquify_slug_skips_slugs_already_handed_out() {
+        let mut counts = HashMap::new();
+        let slugs: Vec<String> = ["echo", "echo", "echo-1", "echo-1", "echo"]
+            .iter()
+            .map(|base| uniquify_slug(base, &mut counts))
+            .collect();
+        assert_eq!(slugs, ["echo", "echo-1", "echo-1-1", "echo-1-2", "echo-2"]);
     }
 
     #[test]

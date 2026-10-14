@@ -997,7 +997,7 @@ impl<'t> Renderer<'t> {
     /// column width calculation so borders align with content: a CJK glyph is two cells.
     fn rendered_inline_width(&self, inline: &Inline) -> usize {
         match inline {
-            Inline::Text(t) => str_cells(t),
+            Inline::Text(t) | Inline::Html(t) => str_cells(t),
             Inline::Bold(inner)
             | Inline::Italic(inner)
             | Inline::Strikethrough(inner)
@@ -1080,7 +1080,7 @@ impl<'t> Renderer<'t> {
 
     fn render_inline(&self, inline: &Inline, base: Style) -> Vec<Span<'static>> {
         match inline {
-            Inline::Text(text) => vec![Span::styled(text.clone(), base)],
+            Inline::Text(text) | Inline::Html(text) => vec![Span::styled(text.clone(), base)],
 
             Inline::Bold(inner) => {
                 let style = base.patch(self.theme.bold);
