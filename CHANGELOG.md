@@ -12,36 +12,19 @@ Each released version's section is also what ships as the GitHub release notes: 
 
 - Paragraphs inside list items, blockquotes and footnotes now reflow to the window width like top-level paragraphs. With reflow off, every paragraph keeps your line breaks.
 - Blank `>` lines in a blockquote now show as empty quoted rows, as many as you wrote.
-- Tables, code blocks, math, rules, headings and quotes inside a list item now line up under the item's text instead of at the left edge, so it's clear they belong to the item.
-- Insert table now puts the table inside a list item when used on an empty item or on the blank line below one.
+- Tables, code blocks and other blocks inside a list item now line up under the item's text, and Insert table on an empty item or the blank line below one puts the table inside the item.
 
 ### Fixed
 
-- Heading links now use GitHub's anchors, so links to headings with non-Latin, accented or `_` text (`#日本語`, `#café`), an image, inline HTML or a line break work, `%`-encoded ones included. A bare `#` link goes to the top of the document.
-- Fixed several layout bugs in lists, blockquotes and footnotes: misplaced clicks, cursor and line numbers; missing or extra blank rows; misaligned indentation of later paragraphs; and text disappearing from the start of some list items.
-- Tables inside list items and blockquotes now edit one cell at a time like any other table.
-- Fixed misplaced clicks, cursor, search matches and selection highlights in table cells containing formatting or wrapped text, and in wide tables.
-- Clicks in tables without edge pipes, or in rows with more or fewer cells than the header, now land in the clicked cell.
-- Tab, the table hints and the row and column commands now work in tables without edge pipes (`a | b`), in tables inside blockquotes and footnotes, and past a row with fewer cells than the header. Row and column edits keep each row's pipes as you wrote them, and Tab no longer gets stuck on a short row.
-- The table mouse handles (drag to reorder or resize, `✕` to delete) now appear on tables inside list items, blockquotes and footnotes, and edit them in place.
-- Fixed the cursor and vim yank highlight going missing or landing on the wrong spot in several places, including multi-line setext headings, lines exactly as wide as the window, and Mermaid or math blocks being edited.
-- Line breaks inside bold, italic or link text are now respected, and clicking a link that spans a line break opens the right URL.
-- Editing a line that shows on a row together with others, such as a heading written over several lines, a link definition inside a quote, or a bare `-` list marker, now shows all of those lines instead of hiding some or drawing over the next.
+- Heading links now use GitHub's anchors, so links to headings with non-Latin, accented or formatted text (`#日本語`, `#café`) work. A bare `#` link goes to the top of the document.
+- Tables inside list items, blockquotes and footnotes, and tables without edge pipes or with short rows, now work like any other table: one-cell editing, Tab, row and column commands, and the mouse handles.
+- CJK text now wraps between characters, keeps punctuation such as `。` and `「` with its text, and no longer adds blank rows in code blocks.
+- Accented letters and Korean text stored in decomposed form, common in files from macOS, now display correctly, and cursor keys in text fields move over a whole emoji or accented letter.
+- Fixed various layout bugs, mostly in lists, blockquotes, footnotes, tables and wrapped text: misplaced clicks, cursor, highlights and line numbers; missing or extra blank rows; and misaligned indentation.
+- HTML comments inside a list item, quote or footnote are now hidden, as they already were elsewhere.
 - A `---` further down a file that starts with frontmatter is no longer mistaken for more frontmatter.
 - Pasting an image on the blank line after an indented code block or HTML block now works.
 - Dragging to select no longer switches lines between rendered and Markdown source mid-drag.
-- Arrow keys, Backspace and Delete in text fields and the vim command line now move over or delete a whole emoji or accented letter, not part of one.
-- Adding, deleting or moving a column, or adding a row, in a table inside a list item no longer moves the table out of the item.
-- The `↩` after a footnote is now clickable when the footnote wraps or contains CJK text.
-- Editing a Mermaid block closed with `~~~` or a longer fence no longer shows that fence as a diagram line.
-- Dialogs now size theme and stylesheet names written in CJK correctly.
-- Accented letters and Korean text stored in decomposed form, common in files from macOS, no longer lose their accents, vowels or final consonants on screen.
-- Code blocks no longer add a blank row after each line of CJK text.
-- HTML comments inside a list item, quote or footnote are now hidden, as they already were elsewhere, and a column-width comment after a table inside a list item now sets its widths.
-- In a very narrow window, clicks and highlights on the wrapped rows of a list item now land on the character under them.
-- Wrapped footnotes now line up under their text, and a paragraph starting with an escaped `1\.` or `\-` no longer wraps like a list item.
-- Editing an item of a numbered list that reaches 10, or of a nested list, no longer shifts its text left.
-- Moving the cursor up or down into or within a wrapped code block or an indented paragraph now lands it directly above or below where it was.
 
 ## [0.1.5] - 2026-10-05
 
