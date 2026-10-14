@@ -607,12 +607,12 @@ where
             // event reported inside a paragraph is handled identically.
             Event::Html(html) | Event::InlineHtml(html) => {
                 let s = html.into_string();
-                // A balanced comment renders as zero spans; anything else stays text so
-                // the source is still visible.
+                // A balanced comment renders as zero spans; anything else renders as
+                // text so the source is still visible.
                 if post_pass::is_html_comment_only(&s) {
                     inlines.push(Inline::HtmlComment(s));
                 } else {
-                    inlines.push(Inline::Text(s));
+                    inlines.push(Inline::Html(s));
                 }
             }
 
@@ -1075,14 +1075,14 @@ mod tests {
     }
 
     #[test]
-    fn inline_html_tag_stays_as_text() {
+    fn inline_html_tag_keeps_its_source() {
         let blocks = parse("line <br> end\n");
         match &blocks[0] {
             Block::Paragraph { inlines, .. } => {
                 assert!(
                     inlines
                         .iter()
-                        .any(|i| matches!(i, Inline::Text(t) if t.contains("<br>"))),
+                        .any(|i| matches!(i, Inline::Html(t) if t.contains("<br>"))),
                     "inlines: {inlines:?}"
                 );
                 assert!(!inlines.iter().any(|i| matches!(i, Inline::HtmlComment(_))));
@@ -1443,7 +1443,7 @@ mod tests {
                     display: false,
                 },
             ),
-            ("- <b>x</b> y\n", Inline::Text("<b>".into())),
+            ("- <b>x</b> y\n", Inline::Html("<b>".into())),
             (
                 "- [^n] y\n\n[^n]: note\n",
                 Inline::FootnoteReference { label: "n".into() },

@@ -105,8 +105,9 @@ impl App {
         Some(LinkTarget::parse(&url, base_dir))
     }
 
-    /// Follow `target` by its classified kind.  A no-op for an empty anchor or
-    /// an unknown heading slug, and when the dirty guard intercepts.
+    /// Follow `target` by its classified kind.  A no-op for an unknown heading
+    /// slug and when the dirty guard intercepts; an empty anchor (`#`) goes to
+    /// the top.
     pub(super) fn follow_link(&mut self, target: LinkTarget, doc_height: usize, doc_width: usize) {
         match target {
             LinkTarget::Url(url) => {
@@ -166,12 +167,9 @@ impl App {
     /// loaded document, if any.  Both the in-document `#anchor` path and the
     /// cross-file deep link resolve through here, so they can't drift.
     ///
-    /// Matched exactly against `ParsedDoc::heading_anchors`, keyed by GFM slug.
-    /// Deliberately no leniency — no slugifying `#Getting Started`, no case
-    /// folding: a fragment that resolved only here would be a link the author
-    /// ships broken everywhere else without ever seeing it fail.
+    /// The matching rules are [`crate::document::ParsedDoc::heading_line`]'s.
     pub(super) fn heading_line_for_fragment(&self, fragment: &str) -> Option<usize> {
-        self.editor.parsed.heading_anchors.get(fragment).copied()
+        self.editor.parsed.heading_line(fragment)
     }
 
     /// Scroll so `slug`'s heading sits at the viewport top, moving the cursor
@@ -1006,6 +1004,35 @@ mod tests {
 
         app.scroll_to_heading("getting-started", H, W);
         assert!(app.editor.scroll > 0, "the slug itself must resolve");
+    }
+
+    /// A non-ASCII heading resolves by its slug as written and percent-encoded,
+    /// the form a link copied from GitHub or a browser carries.
+    #[test]
+    fn a_percent_encoded_fragment_resolves_a_non_ascii_heading() {
+        let src = "Intro.\n\n".to_string() + &"filler\n\n".repeat(30) + "## 日本語 見出し\n";
+        let mut app = app_with_buffer(&src, 0);
+        for fragment in [
+            "日本語-見出し",
+            "%E6%97%A5%E6%9C%AC%E8%AA%9E-%E8%A6%8B%E5%87%BA%E3%81%97",
+        ] {
+            app.editor.scroll = 0;
+            app.scroll_to_heading(fragment, H, W);
+            assert!(app.editor.scroll > 0, "'{fragment}' must resolve");
+        }
+    }
+
+    /// `#` goes to the top as in a browser, not to a heading whose slug is empty,
+    /// and Back returns to where the link was followed.
+    #[test]
+    fn an_empty_anchor_goes_to_the_top() {
+        let src = "Intro.\n\n".to_string() + &"filler\n\n".repeat(30) + "## !!!\n\nEnd.\n";
+        let mut app = app_with_buffer(&src, 0);
+        app.editor.scroll = 20;
+        app.follow_link(LinkTarget::Anchor(String::new()), H, W);
+        assert_eq!(app.editor.scroll, 0);
+        app.navigate_back(H, W);
+        assert_eq!(app.editor.scroll, 20);
     }
 
     #[test]

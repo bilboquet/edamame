@@ -9,7 +9,7 @@ pub mod renderer;
 pub mod row_origin;
 pub mod table_layout;
 
-pub use ast::{inlines_to_plain, Block, Inline, LineSpan, SrcLines};
+pub use ast::{heading_slug_text, inlines_to_plain, Block, Inline, LineSpan, SrcLines};
 pub use destination::{escape_destination, escape_destination_in_table, local_image_urls};
 pub use inline_col_map::{strip_atx_closing, InlineColMap, RefLabels};
 pub use parser::{

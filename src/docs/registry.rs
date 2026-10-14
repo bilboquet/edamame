@@ -120,10 +120,11 @@ impl DocId {
         }
     }
 
-    /// The page a cross-document link names, matched on the file name exactly. No leniency,
-    /// as in [`crate::app::App::heading_line_for_fragment`]: a link that resolves only inside
-    /// edamame ships broken to GitHub. Paths with a directory component decline and fall to
-    /// [`super::link::resolve_doc_reference`]'s GitHub branch; the index is unreachable here.
+    /// The page a cross-document link names, matched on the file name exactly. No leniency
+    /// (the rule [`crate::document::ParsedDoc::heading_line`] follows for headings): a link
+    /// that resolves only inside edamame ships broken to GitHub. Paths with a directory
+    /// component decline and fall to [`super::link::resolve_doc_reference`]'s GitHub branch;
+    /// the index is unreachable here.
     pub fn from_slug(slug: &str) -> Option<Self> {
         ALL_DOCS.iter().find(|p| p.slug == slug).map(|p| p.id)
     }

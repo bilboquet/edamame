@@ -57,6 +57,7 @@ fn collect_inlines<'a>(inlines: &'a [Inline], out: &mut Vec<&'a str>) {
             | Inline::Link { text: inner, .. } => collect_inlines(inner, out),
             Inline::Text(_)
             | Inline::Code(_)
+            | Inline::Html(_)
             | Inline::HtmlComment(_)
             | Inline::FootnoteReference { .. }
             | Inline::Math { .. }

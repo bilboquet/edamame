@@ -16,7 +16,6 @@ use crate::document::parsed_doc::{gfm_slug, uniquify_slug};
 use crate::image::normalize_svg;
 use crate::markdown::highlight::{self, TokenClass};
 use crate::markdown::parse_offsets::DocParser;
-use crate::markdown::parser::post_pass::is_html_comment_only;
 use images::{local_image, ImageResolver};
 
 mod images;
@@ -226,7 +225,7 @@ fn parser_options() -> Options {
 /// went nowhere.
 ///
 /// The slug is the one `ParsedDoc::heading_anchors` keys the in-app jump on — [`gfm_slug`] over
-/// the same plain text `inlines_to_plain` builds, deduplicated by [`uniquify_slug`] — so a
+/// the same text `heading_slug_text` builds in-app, deduplicated by [`uniquify_slug`] — so a
 /// fragment that resolves in edamame resolves in the export.  Unlike the in-app table, which
 /// indexes top-level blocks only, a heading nested in a list or quote gets an id too, as on
 /// GitHub.  A nested heading also takes its slug's count, so where it shares text with a later
@@ -240,26 +239,29 @@ fn assign_heading_ids(events: &mut [Event<'_>]) {
             i += 1;
             continue;
         }
+        // The same text `heading_slug_text` builds in-app: no image alt text, no inline HTML,
+        // and a line break is no `-` in the slug.
         let mut text = String::new();
+        let mut image_depth = 0usize;
         let mut j = i + 1;
         while let Some(event) = events.get(j) {
             match event {
                 Event::End(TagEnd::Heading(_)) => break,
+                Event::Start(Tag::Image { .. }) => image_depth += 1,
+                Event::End(TagEnd::Image) => image_depth = image_depth.saturating_sub(1),
+                _ if image_depth > 0 => {}
                 Event::Text(t) | Event::Code(t) => text.push_str(t),
                 Event::InlineMath(m) => text.push_str(&literal_math(m, false)),
                 Event::DisplayMath(m) => text.push_str(&literal_math(m, true)),
-                Event::SoftBreak => text.push(' '),
-                Event::HardBreak => text.push('\n'),
-                // The in-app parser keeps non-comment inline HTML as text.
-                Event::InlineHtml(h) if !is_html_comment_only(h) => text.push_str(h),
+                Event::SoftBreak | Event::HardBreak => text.push('\n'),
                 _ => {}
             }
             j += 1;
         }
-        let base = gfm_slug(&text);
-        if !base.is_empty() {
-            let slug = uniquify_slug(&base, &mut counts);
-            if let Event::Start(Tag::Heading { id, .. }) = &mut events[i] {
+        // Uniquified even when empty, as in-app: a second empty heading takes `-1`.
+        let slug = uniquify_slug(&gfm_slug(&text), &mut counts);
+        if let Event::Start(Tag::Heading { id, .. }) = &mut events[i] {
+            if !slug.is_empty() {
                 *id = Some(CowStr::Boxed(slug.into_boxed_str()));
             }
         }
@@ -1415,6 +1417,23 @@ mod tests {
             );
         }
         assert_eq!(parsed.heading_anchors.len(), 4);
+    }
+
+    /// A heading with nothing to slug gets no id but still takes its count, as in-app: the
+    /// second `""` is `-1`, so a heading that slugs to `-1` itself must move on to `-1-1` in
+    /// both.
+    #[test]
+    fn empty_slug_headings_count_as_in_app() {
+        let md = "# !!!\n\n# ???\n\n# -1\n";
+        let html = render_html(md, &opts_inline_css()).unwrap();
+        assert!(html.contains("<h1>!!!</h1>"), "{html}");
+        assert!(html.contains("<h1 id=\"-1\">???</h1>"), "{html}");
+        assert!(html.contains("<h1 id=\"-1-1\">-1</h1>"), "{html}");
+        let theme = crate::config::Theme::default();
+        let parsed = crate::document::ParsedDoc::build(md, &theme, false, 4);
+        let mut keys: Vec<&str> = parsed.heading_anchors.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["-1", "-1-1"]);
     }
 
     // ── Figures ────────────────────────────────────────────────────────

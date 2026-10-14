@@ -247,8 +247,7 @@ mod tests {
 
     /// A tip's link must name a real page, and its fragment must be a real heading on that page.
     /// A missing anchor would only open the page top — a silent papercut — so it is pinned here:
-    /// resolution is exactly `ParsedDoc::heading_anchors`, the same table
-    /// [`App::heading_line_for_fragment`](crate::app::App) consults.
+    /// resolution is exactly [`ParsedDoc::heading_line`], the resolver a followed link uses.
     #[test]
     fn every_link_resolves_to_a_page_and_a_heading() {
         let theme: &'static Theme = Box::leak(Box::new(Theme::default()));
@@ -263,7 +262,7 @@ mod tests {
             );
             if let Some(fragment) = link.fragment {
                 assert!(
-                    parsed.heading_anchors.contains_key(fragment),
+                    parsed.heading_line(fragment).is_some(),
                     "tip {} links {}#{fragment}, which is not a heading on that page",
                     tip.id,
                     link.doc.title(),

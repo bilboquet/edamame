@@ -59,7 +59,7 @@ fn cell_min_width(inlines: &[Inline]) -> usize {
 fn flatten_breakable_chars(inlines: &[Inline], breakable: bool, out: &mut Vec<(char, bool)>) {
     for inline in inlines {
         match inline {
-            Inline::Text(t) => out.extend(t.chars().map(|c| (c, breakable))),
+            Inline::Text(t) | Inline::Html(t) => out.extend(t.chars().map(|c| (c, breakable))),
             Inline::Bold(inner)
             | Inline::Italic(inner)
             | Inline::Strikethrough(inner)

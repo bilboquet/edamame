@@ -179,7 +179,7 @@ mod tests {
         let theme: &'static Theme = Box::leak(Box::new(Theme::default()));
         let parsed = ParsedDoc::build(&id.source(), theme, true, 80);
         assert!(
-            parsed.heading_anchors.contains_key(fragment),
+            parsed.heading_line(fragment).is_some(),
             "'{fragment}' is not a heading in {}",
             id.title()
         );

@@ -191,7 +191,7 @@ What happens depends on the target:
 | `#heading` | Jumps within the document |
 | `[^note]` | Jumps to the footnote |
 
-A heading is named by its GitHub-style slug: lowercase, punctuation dropped, spaces turned into hyphens — `## When the file changes` is `#when-the-file-changes`. That is the same fragment GitHub and your browser resolve, so a link that works here works everywhere else too. If nothing in the target document matches, the file still opens and the hint line tells you the section wasn't found.
+A heading is named by its GitHub-style slug: lowercase, punctuation and symbols dropped, each space turned into a hyphen — `## When the file changes` is `#when-the-file-changes`. Letters in any script are kept, so `## 日本語の見出し` is `#日本語の見出し`, and a link copied from GitHub or a browser, which spells it `#%E6%97%A5…`, works too. When two headings share a slug, the later ones get `-1`, `-2`, … appended, as on GitHub. A bare `#` goes to the top of the document. That is the same fragment GitHub and your browser resolve, so a link that works here works everywhere else too. If nothing in the target document matches, the file still opens and the hint line tells you the section wasn't found.
 
 `Alt-←` / `Alt-→` move back and forward through everywhere you've been — across files and within a document. Leaving a modified file prompts first.
 

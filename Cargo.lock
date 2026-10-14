@@ -937,6 +937,7 @@ dependencies = [
  "tracing-subscriber",
  "tui-big-text",
  "two-face",
+ "unicode-properties",
  "unicode-segmentation",
  "unicode-width",
  "ureq",

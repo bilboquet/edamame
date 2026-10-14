@@ -89,6 +89,9 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 # Unicode helpers
 unicode-width = "0.2"
 unicode-segmentation = "1"
+# General Category, for heading slugs that keep letters in every script as GitHub does
+# (`document::parsed_doc::gfm_slug`).  Already in the graph through `rustybuzz` (via usvg).
+unicode-properties = { version = "0.1", default-features = false, features = ["general-category"] }
 
 # Regex — used only by the vim `:s` / `:%s` ex substitution; the `/` search
 # path stays literal-substring (smartcase).  `fancy-regex` rather than

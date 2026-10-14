@@ -17,6 +17,7 @@ Each released version's section is also what ships as the GitHub release notes: 
 
 ### Fixed
 
+- Heading links now use GitHub's anchors, so links to headings with non-Latin, accented or `_` text (`#日本語`, `#café`), an image, inline HTML or a line break work, `%`-encoded ones included. A bare `#` link goes to the top of the document.
 - Fixed several layout bugs in lists, blockquotes and footnotes: misplaced clicks, cursor and line numbers; missing or extra blank rows; misaligned indentation of later paragraphs; and text disappearing from the start of some list items.
 - Tables inside list items and blockquotes now edit one cell at a time like any other table.
 - Fixed misplaced clicks, cursor, search matches and selection highlights in table cells containing formatting or wrapped text, and in wide tables.
