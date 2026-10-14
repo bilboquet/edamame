@@ -11,7 +11,7 @@ use crate::markdown::table_layout::{char_cells, CellOverlay};
 use crate::ui::line_render;
 
 use crate::document::row_map::{self, RawPos};
-use crate::document::wrap::Indent;
+use crate::document::wrap::{Indent, PaintedRows};
 use crate::markdown::{ColOrigin, ContentKind};
 
 /// [`make_raw_line_with_selection`] with no selection.
@@ -527,24 +527,56 @@ pub(super) fn paint_cols_on_line(
     );
 }
 
-/// Paint `overlay.raw_text` into the cell's rendered column range, directly into the buffer
-/// (the underlying row must already be rendered). `selection_cols` is painted here because
-/// the overlay clobbers whatever the generic selection pass already painted.
+/// Where a rendered row was painted: `line` behind `indent`, from `visual_y`, its first
+/// `skip_rows` wrap rows scrolled off and `rows_used` rows shown.
+pub(super) struct PaintedRow<'l, 'a> {
+    pub(super) line: &'l Line<'a>,
+    pub(super) indent: Indent,
+    pub(super) visual_y: u16,
+    pub(super) skip_rows: usize,
+    pub(super) rows_used: u16,
+}
+
+/// Paint `overlay.raw_text` into the cell's rendered column range of `row`, directly into the
+/// buffer (the row must already be rendered). `selection_cols` is painted here because the
+/// overlay clobbers whatever the generic selection pass already painted.
+///
+/// The overlay's columns count along the row unwrapped, so each cell lands where the row's wrap
+/// put it ([`PaintedRows::unwrapped_cell_positions`]), the same geometry a click resolves
+/// through: painted at the unwrapped column instead, a cell of a table wider than the viewport
+/// showed on the wrong row, or past the edge (issue #69).
 pub(super) fn overlay_raw_cell(
     buf: &mut TuiBuf,
     area: Rect,
-    visual_y: u16,
+    row: &PaintedRow<'_, '_>,
     overlay: &CellOverlay,
     selection_cols: Option<(usize, usize)>,
     theme: &Theme,
     // Block-cursor style when visible this frame; `None` when blinked off or not in this row.
     cursor: Option<Style>,
 ) {
-    if visual_y >= area.height {
+    let PaintedRow {
+        line,
+        indent,
+        visual_y,
+        skip_rows,
+        rows_used,
+    } = *row;
+    if visual_y >= area.height || area.width == 0 {
         return;
     }
-    let abs_y = area.y + visual_y;
-    let area_end = area.x.saturating_add(area.width);
+    let positions =
+        PaintedRows::new(line, indent, usize::from(area.width)).unwrapped_cell_positions();
+    // The screen cell of unwrapped column `col`, when it's painted this frame.
+    let screen_cell = |col: usize| {
+        let (sub_row, x) = positions.get(col).copied().flatten()?;
+        let row = u16::try_from(sub_row.checked_sub(skip_rows)?).ok()?;
+        let y = visual_y
+            .checked_add(row)
+            .filter(|&y| row < rows_used && y < area.height)?;
+        let x = u16::try_from(x).ok().filter(|&x| x < area.width)?;
+        Some((area.x + x, area.y + y))
+    };
     // Strip `theme.normal`'s bg so the table-row stripe under the cell survives.
     let base_style = Style {
         bg: None,
@@ -569,17 +601,27 @@ pub(super) fn overlay_raw_cell(
             i += 1;
             continue;
         }
-        let straddles = col + w > overlay.rendered_end;
-        if straddles {
-            // Never straddle the border: blank the last cell instead.
+        let at = screen_cell(col);
+        // A wide glyph needs its two cells side by side: not past the border, and not split
+        // across a wrap.
+        let past_border = w > 1 && col + w > overlay.rendered_end;
+        let split = w > 1
+            && !past_border
+            && at
+                .zip(screen_cell(col + 1))
+                .is_none_or(|((x, y), next)| next != (x + 1, y));
+        let mut targets = [at, None];
+        if past_border {
+            // Blank the last cell before the border instead.
             (ch, w) = (' ', 1);
+        } else if split {
+            // Blank both cells, keeping the chars after it at the columns a click resolves.
+            ch = ' ';
+            targets[1] = screen_cell(col + 1);
         }
-        let abs_x = area.x.saturating_add(col as u16);
-        if abs_x >= area_end {
-            break;
-        }
-        // The blank standing in for a wide glyph is no glyph for its marks to join.
-        glyph_cell = (!straddles).then_some((abs_x, abs_y));
+        // A blank standing in for a wide glyph is no glyph for its marks to join, nor is a cell
+        // absorbed by a wrap or scrolled off.
+        glyph_cell = at.filter(|_| !(past_border || split));
         let mut style = base_style;
         if matches!(selection_cols, Some((s, e)) if i >= s && i < e) {
             style = style.patch(theme.selection);
@@ -587,7 +629,10 @@ pub(super) fn overlay_raw_cell(
         if let Some(cursor_style) = cursor.filter(|_| overlay.cursor_in_cell == Some(i)) {
             style = cursor_style;
         }
-        if let Some(cell) = buf.cell_mut((abs_x, abs_y)) {
+        for cell in targets.into_iter().flatten() {
+            let Some(cell) = buf.cell_mut(cell) else {
+                continue;
+            };
             // `Cell::set_style` only adds/removes modifiers, so e.g. the BOLD of a rendered
             // `**x**` would bleed through the raw chars; zero them by hand.
             cell.modifier = Modifier::empty();
@@ -621,8 +666,97 @@ mod tests {
         for x in 0..10 {
             buf[(x, 0)].set_char('x');
         }
-        overlay_raw_cell(&mut buf, area, 0, ov, None, &Theme::default(), Some(cursor));
+        let line = Line::from("x".repeat(10));
+        let row = PaintedRow {
+            line: &line,
+            indent: Indent::NONE,
+            visual_y: 0,
+            skip_rows: 0,
+            rows_used: 1,
+        };
+        overlay_raw_cell(
+            &mut buf,
+            area,
+            &row,
+            ov,
+            None,
+            &Theme::default(),
+            Some(cursor),
+        );
         buf
+    }
+
+    /// `ov` over `│ a   │ b   │` painted 10 cells wide, which wraps it after `│ a   │ ` (issue
+    /// #69), from the row's `skip_rows`th wrap row; unpainted cells keep their `x`.
+    fn painted_wrapped(ov: &CellOverlay, cursor: Style, skip_rows: usize) -> TuiBuf {
+        let area = Rect::new(0, 0, 10, 2);
+        let mut buf = TuiBuf::empty(area);
+        for y in 0..2 {
+            for x in 0..10 {
+                buf[(x, y)].set_char('x');
+            }
+        }
+        let line = Line::from("│ a   │ b   │");
+        let row = PaintedRow {
+            line: &line,
+            indent: Indent::NONE,
+            visual_y: 0,
+            skip_rows,
+            rows_used: 2 - skip_rows as u16,
+        };
+        overlay_raw_cell(
+            &mut buf,
+            area,
+            &row,
+            ov,
+            None,
+            &Theme::default(),
+            Some(cursor),
+        );
+        buf
+    }
+
+    /// The second cell of a row wrapped mid-cell paints where the wrap put each of its cells:
+    /// its pad on the first row, its text and the cursor after it on the second, nothing past
+    /// the first row's last char.  It used to paint all of it on the first row, at the
+    /// unwrapped columns.
+    #[test]
+    fn overlay_raw_cell_follows_the_rows_wrap() {
+        let cursor = Style::default().bg(ratatui::style::Color::Magenta);
+        let buf = painted_wrapped(&overlay(7, 12, " b ", Some(2)), cursor, 0);
+        assert_eq!(buf[(7, 0)].symbol(), " ");
+        assert_eq!(buf[(8, 0)].symbol(), "x", "past the first row's text");
+        assert_eq!(buf[(0, 1)].symbol(), "b");
+        assert_eq!(buf[(1, 1)].bg, ratatui::style::Color::Magenta);
+        assert_eq!(buf[(3, 1)].symbol(), " ");
+        assert_eq!(
+            buf[(4, 1)].symbol(),
+            "x",
+            "the border cell is not the overlay's"
+        );
+
+        // Scrolled one wrap row off the top, the second row paints at the top.
+        let buf = painted_wrapped(&overlay(7, 12, " b ", Some(2)), cursor, 1);
+        assert_eq!(buf[(0, 0)].symbol(), "b");
+        assert_eq!(buf[(7, 0)].symbol(), "x", "the first row is scrolled off");
+    }
+
+    /// A wide raw glyph the wrap would split is blanked in both its cells, as at the border, and
+    /// the char after it keeps its unwrapped column (9, the second row's second cell), where a
+    /// click resolves to it.  Scrolled one wrap row off the top, the same holds on the top row.
+    #[test]
+    fn overlay_raw_cell_blanks_a_glyph_the_wrap_splits() {
+        let ov = overlay(7, 12, "日x", None);
+        let buf = painted_wrapped(&ov, Style::default(), 0);
+        assert_eq!(buf[(7, 0)].symbol(), " ");
+        assert_eq!(buf[(0, 1)].symbol(), " ");
+        assert_eq!(buf[(1, 1)].symbol(), "x");
+        let shown = (0..2).flat_map(|y| (0..10).map(move |x| (x, y)));
+        assert!(shown.into_iter().all(|c| buf[c].symbol() != "日"));
+
+        let buf = painted_wrapped(&ov, Style::default(), 1);
+        assert_eq!(buf[(0, 0)].symbol(), " ");
+        assert_eq!(buf[(1, 0)].symbol(), "x");
     }
 
     /// A wide raw glyph advances two cells, so the chars after it and the cursor land where

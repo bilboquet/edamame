@@ -21,7 +21,7 @@ use super::table_view::{self, TableLayoutSnapshot};
 use self::cell_overlay::{compute_cell_chunk_overlay, compute_wrapped_cell_overlay};
 use self::paint::{
     make_code_styled_body_line, make_raw_line_over, make_raw_line_with_selection, overlay_raw_cell,
-    paint_byte_range_overlay, Overlay,
+    paint_byte_range_overlay, Overlay, PaintedRow,
 };
 
 pub(crate) use self::paint::{
@@ -211,13 +211,14 @@ impl<'a> StatefulWidget for RenderedView<'a> {
         // Where the cursor's table row starts past its container prefix; its cells count from
         // there.
         let table_content_col = cursor_table.as_ref().map_or(0, |t| t.raw_col);
-        // Data-row cell in a row that wraps: one raw chunk per rendered sub. `None` for
-        // non-data and single-sub rows, which the single-line overlays handle.  The row must
-        // show the cursor's own line, which `cursor_col` counts along (a stale parse can name
-        // another).
+        // A cell, the header's or a data row's, in a row that wraps: one raw chunk per rendered
+        // sub.  `None` for borders and single-sub rows, which the single-line overlays handle
+        // (on a wrapped header they replaced only its first sub, leaving the rest rendered).
+        // The row must show the cursor's own line, which `cursor_col` counts along (a stale
+        // parse can name another).
         let wrapped_cell = cursor_table
             .as_ref()
-            .filter(|t| t.cells && t.index >= 1 && t.line == cursor_raw_line)
+            .filter(|t| t.cells && t.line == cursor_raw_line)
             .and_then(|t| {
                 compute_wrapped_cell_overlay(
                     editor,
@@ -620,10 +621,17 @@ impl<'a> StatefulWidget for RenderedView<'a> {
                             + overlay.raw_cell_byte_start;
                         text_sel_cols(&overlay.raw_text, cell_start, sel)
                     });
+                    let row = PaintedRow {
+                        line,
+                        indent: row_indent,
+                        visual_y: vis_y as u16,
+                        skip_rows,
+                        rows_used: rows_used as u16,
+                    };
                     overlay_raw_cell(
                         buf,
                         area,
-                        vis_y as u16,
+                        &row,
                         overlay,
                         sel_in_cell,
                         self.theme,
@@ -671,10 +679,17 @@ impl<'a> StatefulWidget for RenderedView<'a> {
                             + overlay.raw_cell_byte_start;
                         text_sel_cols(&overlay.raw_text, cell_start, sel)
                     });
+                    let row = PaintedRow {
+                        line,
+                        indent: row_indent,
+                        visual_y: vis_y as u16,
+                        skip_rows,
+                        rows_used: rows_used as u16,
+                    };
                     overlay_raw_cell(
                         buf,
                         area,
-                        vis_y as u16,
+                        &row,
                         &overlay,
                         sel_in_cell,
                         self.theme,

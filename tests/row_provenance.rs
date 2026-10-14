@@ -1005,22 +1005,11 @@ fn clicking_where_the_cursor_shows_keeps_it_there() {
 }
 
 /// Corpus entries [`clicking_around_a_revealed_row_keeps_the_cursor_where_it_shows`] skips at
-/// 12 cells, each a known bug outside row provenance.  A table too wide to shrink into 12 cells
-/// (quoted, in a list item, behind a footnote leader, or three columns) wraps its rows in
-/// `line_render`; with a cell revealed, the cursor past a cell's text paints on the wrapped row,
-/// and a click there lands one char left, or nowhere (issue #69).  Their fully piped
-/// equivalents, and the footnote table under a label without a `|`, miss identically, so pairing
-/// cells plays no part.  A revealed line exactly as wide as the viewport (`[^1]: a note`) has no blank cell for a cursor at its end,
-/// so the painter draws that cursor over the last char, and a click there lands on that char
-/// (`paint_row`; accepted, since an extra row for it would change every row count).
-const KNOWN_REVEALED_MISSES: &[&str] = &[
-    "> | a | b |\n> |---|---|\n> | 1 | 2 |\n",
-    "- item\n\n  | a | b |\n  |---|---|\n  | 1 | 2 |\n",
-    "| a | b | c |\n|---|---|---|\n1 | 2 |\n| 1 | 2 | 3 | 4 |\n",
-    "> x\n>\n> a | b\n> --|--\n> 1 | 2 |\n",
-    "x[^a|b]\n\n[^a|b]: | p | q |\n    |---|---|\n    | 1 | 2 |\n",
-    "[^1]: a note\n    more\n\nref[^1]\n",
-];
+/// 12 cells, each a known miss outside row provenance.  A revealed line exactly as wide as the
+/// viewport (`[^1]: a note`) has no blank cell for a cursor at its end, so the painter draws that
+/// cursor over the last char, and a click there lands on that char (`paint_row`; accepted, since
+/// an extra row for it would change every row count).
+const KNOWN_REVEALED_MISSES: &[&str] = &["[^1]: a note\n    more\n\nref[^1]\n"];
 
 /// [`check_click_and_paint_from`] over the corpus with the cursor's row revealed: the cursor on
 /// each non-blank line in turn, mid-line, so every reflowed paragraph stacks with the cursor on
@@ -1058,6 +1047,45 @@ fn check_revealed_on_every_line(src: &str) {
         }
         line_start += line.len();
     }
+}
+
+/// A revealed cell of a table that wraps (issue #69).  A table too wide for the viewport wraps
+/// its rows on screen, and the cell's raw text must paint where that wrap put each cell, not at
+/// its unwrapped column, which put it on the row above or past the right edge.  A column
+/// narrowed to fit wraps its cells instead, and a header cell's raw text must fill every line
+/// the cell wraps to, as a data cell's does, not leave its later lines rendered.  Every click
+/// lands where the cursor then shows, with the cursor starting in each cell of each row, at each
+/// width from where the table fits down to where its rows wrap: at top level, quoted, in a list
+/// item, with wide glyphs, and with a header cell that wraps.
+#[test]
+fn clicking_a_revealed_cell_of_a_wrapping_table_keeps_the_cursor_where_it_shows() {
+    let cases = [
+        "| a | b |\n|---|---|\n| 1 | 2 |\n",
+        "| alpha | beta |\n|---|---|\n| one | two |\n",
+        "> | a | b |\n> |---|---|\n> | 1 | 2 |\n",
+        "- item\n\n  | a | b |\n  |---|---|\n  | 1 | 2 |\n",
+        "| 日本 | b |\n|---|---|\n| 1 | 語x |\n",
+        "| ab cd | b |\n|---|---|\n| 1 | 2 |\n",
+    ];
+    std::thread::scope(|scope| {
+        for src in cases {
+            scope.spawn(move || {
+                // The first char of each cell's text, on every row but the separator.
+                let cells: Vec<usize> = src
+                    .match_indices("| ")
+                    .map(|(i, _)| i + 2)
+                    .filter(|&at| !src[at..].starts_with(['-', '|', '\n']))
+                    .collect();
+                for width in 8..=16 {
+                    for &at in &cells {
+                        check_click_and_paint_from(src, width, Some(at)).unwrap_or_else(|e| {
+                            panic!("width {width}, cursor at {at}: {e}\nin {src:?}")
+                        });
+                    }
+                }
+            });
+        }
+    });
 }
 
 /// Nested reflowed paragraphs, revealed (Phase 7): the cursor rests in one, which shows its

@@ -19,7 +19,7 @@ Each released version's section is also what ships as the GitHub release notes: 
 
 - Fixed several layout bugs in lists, blockquotes and footnotes: misplaced clicks, cursor and line numbers; missing or extra blank rows; misaligned indentation of later paragraphs; and text disappearing from the start of some list items.
 - Tables inside list items and blockquotes now edit one cell at a time like any other table.
-- Fixed misplaced clicks, cursor, search matches and selection highlights in table cells containing formatting or wrapped text.
+- Fixed misplaced clicks, cursor, search matches and selection highlights in table cells containing formatting or wrapped text, and in wide tables.
 - Clicks in tables without edge pipes, or in rows with more or fewer cells than the header, now land in the clicked cell.
 - Tab, the table hints and the row and column commands now work in tables without edge pipes (`a | b`), in tables inside blockquotes and footnotes, and past a row with fewer cells than the header. Row and column edits keep each row's pipes as you wrote them, and Tab no longer gets stuck on a short row.
 - The table mouse handles (drag to reorder or resize, `✕` to delete) now appear on tables inside list items, blockquotes and footnotes, and edit them in place.

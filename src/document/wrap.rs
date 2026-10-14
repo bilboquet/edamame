@@ -446,6 +446,26 @@ impl PaintedRows {
                 .map(|&(c, _)| char_cells(c))
                 .sum::<usize>()
     }
+
+    /// Where each cell of the line paints, indexed by the cell's column on the line laid out
+    /// unwrapped (its chars' cells summed from the first): `(sub_row, cell)`, `None` for a cell
+    /// of a char a break absorbed.  A table row's pipes are measured unwrapped, so a revealed
+    /// cell's overlay goes through this to land where the row's wrap put that cell.
+    pub fn unwrapped_cell_positions(&self) -> Vec<Option<(usize, usize)>> {
+        let mut out = Vec::new();
+        for (sub_row, &(start, end, next_start)) in self.rows.iter().enumerate() {
+            let mut x = self.indent.row(sub_row);
+            for &(c, _) in &self.chars[start..end] {
+                let w = char_cells(c);
+                out.extend((x..x + w).map(|cell| Some((sub_row, cell))));
+                x += w;
+            }
+            for &(c, _) in &self.chars[end..next_start] {
+                out.extend(std::iter::repeat_n(None, char_cells(c)));
+            }
+        }
+        out
+    }
 }
 
 /// Where char `char_idx` of `line` paints at `width`: its sub-row and the cells it covers there
@@ -533,6 +553,36 @@ pub fn sub_line_of_col(rows: &[(usize, usize, usize)], raw_col: usize) -> (usize
 mod tests {
     use super::*;
     use ratatui::text::Span;
+
+    /// Each unwrapped cell lands on the row and cell the wrap put it: a wide glyph's two cells
+    /// side by side, a continuation row's behind its hang, and the cell of a space the break
+    /// absorbed nowhere.
+    #[test]
+    fn unwrapped_cell_positions_follow_the_wrap() {
+        let painted = PaintedRows::new(&Line::from("ab 日 cd"), Indent::hanging(1), 5);
+        assert_eq!(
+            painted.rows,
+            vec![(0, 3, 3), (3, 5, 5), (5, 7, 7)],
+            "`ab ` / ` 日 ` / ` cd`"
+        );
+        assert_eq!(
+            painted.unwrapped_cell_positions(),
+            vec![
+                Some((0, 0)),
+                Some((0, 1)),
+                Some((0, 2)),
+                Some((1, 1)),
+                Some((1, 2)),
+                Some((1, 3)),
+                Some((2, 1)),
+                Some((2, 2)),
+            ]
+        );
+        let absorbed = PaintedRows::new(&Line::from("abcd ef"), Indent::NONE, 4);
+        assert_eq!(absorbed.rows, vec![(0, 4, 5), (5, 7, 7)]);
+        assert_eq!(absorbed.unwrapped_cell_positions()[4], None);
+        assert_eq!(absorbed.unwrapped_cell_positions()[5], Some((1, 0)));
+    }
 
     #[test]
     fn visual_rows_short_line() {
