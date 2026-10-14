@@ -201,7 +201,7 @@ Every corpus stays inside the 16 ms budget at 5k; `tables`, `prose` and `lists` 
 
 #### Cost of row provenance
 
-Row provenance ([`plans/row-provenance.md`](plans/row-provenance.md)) records each leaf's source positions during the parse and each rendered row's origin during the render. Its cost was measured as user-space instructions per iteration on a pinned P-core (`perf stat -e cpu_core/instructions/u`, `taskset -c 0`), comparing the tree before the plan (`6cf3e85`) with the finished one, both built with the same toolchain. Wall-clock time on this laptop moves several percent between runs, which would hide most of these deltas. Each figure is (count at N iterations − count at 0) / N, each count the median of five runs. The noise floor is about ±1.5%: a process's count lands in one of two modes about 1.3% apart, so a single run can't resolve less.
+Row provenance records each leaf's source positions during the parse and each rendered row's origin during the render. Its cost was measured as user-space instructions per iteration on a pinned P-core (`perf stat -e cpu_core/instructions/u`, `taskset -c 0`), comparing the tree before the plan (`6cf3e85`) with the finished one, both built with the same toolchain. Wall-clock time on this laptop moves several percent between runs, which would hide most of these deltas. Each figure is (count at N iterations − count at 0) / N, each count the median of five runs. The noise floor is about ±1.5%: a process's count lands in one of two modes about 1.3% apart, so a single run can't resolve less.
 
 | Corpus (20k) | `parse_merged` | `render_only` | `full_pipeline` | `full_pipeline_memoized` |
 |---|---|---|---|---|
