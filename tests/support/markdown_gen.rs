@@ -100,6 +100,9 @@ fn word() -> impl Strategy<Value = String> {
         1 => "[a-z]{1,3}".prop_map(|w| format!("[^{w}]")),
         1 => prop::sample::select(vec!["a--b", "c...", "d---e", "&amp;", "x\\*y"])
             .prop_map(str::to_owned),
+        // Highlights holding smart punctuation, whose `==` pair across the substituted glyphs.
+        1 => prop::sample::select(vec!["==it's==", "==a -- b==", "==q...==", "==x ---- y=="])
+            .prop_map(str::to_owned),
     ]
 }
 

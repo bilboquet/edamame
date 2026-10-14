@@ -624,6 +624,10 @@ const CORPUS: &[&str] = &[
     "a -- b... c---d\n\na &amp; b &copy; \\* <http://x.y>\n",
     // Smart punctuation beside a literal `==` and a highlight pair.
     "x == y... and a ==hi== b...\n",
+    // A highlight holding smart punctuation: its markers pair across the glyphs.
+    "==it's== and ==\"q\" -- r...== s\n",
+    // Dash runs of four and five hyphens, each one piece of several glyphs.
+    "==a ---- b== and ==c ----- d==\n",
     // Fences whose rows are all chrome, nested where char 0 is a container prefix.
     "- a\n\n  ```rust\n  x\n  ```\n\n> - ```\n>   y\n>   ```\n",
     // Nested paragraphs that reflow (Phase 7): a quote's, an item's first and later ones, a
