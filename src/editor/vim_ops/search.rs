@@ -2,9 +2,7 @@
 //! `*` / `#`.  `vim_feed` turns it into a literal query for the base search feature
 //! (smartcase lives there, not here).
 
-use crate::document::Buffer;
-
-use super::motion::{class, Class};
+use crate::document::{class_of, Buffer, Class};
 
 /// The keyword under the cursor — or, if the cursor is not on one, the next keyword on
 /// the same line — for `*` / `#`.  Returns its **start** char offset and literal text,
@@ -20,6 +18,7 @@ pub fn word_under_cursor_at(buf: &Buffer, cursor: usize) -> Option<(usize, Strin
         return None;
     }
     let rope = buf.rope();
+    let class = |i: usize| class_of(buf, i, false);
     let line = buf.char_to_line(cursor.min(len.saturating_sub(1)));
     let line_start = buf.line_to_char(line);
     let mut line_end = line_start;
@@ -28,7 +27,7 @@ pub fn word_under_cursor_at(buf: &Buffer, cursor: usize) -> Option<(usize, Strin
     }
 
     let mut pos = cursor.clamp(line_start, line_end);
-    while pos < line_end && class(rope.char(pos), false) != Class::Word {
+    while pos < line_end && class(pos) != Class::Word {
         pos += 1;
     }
     if pos >= line_end {
@@ -36,11 +35,11 @@ pub fn word_under_cursor_at(buf: &Buffer, cursor: usize) -> Option<(usize, Strin
     }
 
     let mut start = pos;
-    while start > line_start && class(rope.char(start - 1), false) == Class::Word {
+    while start > line_start && class(start - 1) == Class::Word {
         start -= 1;
     }
     let mut end = pos;
-    while end < line_end && class(rope.char(end), false) == Class::Word {
+    while end < line_end && class(end) == Class::Word {
         end += 1;
     }
     Some((start, buf.slice_to_string(start, end)))
@@ -78,6 +77,13 @@ mod tests {
     fn word_under_cursor_skips_forward_to_the_next_keyword() {
         let b = buf("a   word");
         assert_eq!(word(&b, 1).as_deref(), Some("word"));
+    }
+
+    #[test]
+    fn word_under_cursor_keeps_a_combining_mark_with_its_letter() {
+        let b = buf("cafe\u{301}s bar");
+        assert_eq!(word(&b, 0).as_deref(), Some("cafe\u{301}s"));
+        assert_eq!(word(&b, 4).as_deref(), Some("cafe\u{301}s"));
     }
 
     #[test]

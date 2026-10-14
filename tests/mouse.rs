@@ -703,6 +703,23 @@ fn double_click_selects_word_under_pointer() {
 }
 
 #[test]
+fn double_click_keeps_a_combining_mark_in_the_word() {
+    // A decomposed `cafés`: U+0301 used to end the word, so the double-click selected `cafe`.
+    let mut st = state("x cafe\u{301}s y\n");
+    st.mode = Mode::Rendered;
+    let mut mouse = MouseDispatcher::new();
+    let mut anchor: Option<mouse_ops::DragTarget> = None;
+    for ev in [click_event(3, 0), up_event(3, 0), click_event(3, 0)] {
+        if let Some(a) = mouse.dispatch(ev, area()) {
+            mouse_ops::apply(&mut st, a, &mut anchor, &[], VP, VW);
+        }
+    }
+    let sel = st.selection.expect("double-click selects");
+    let (s, e) = sel.range();
+    assert_eq!(st.buffer.slice_to_string(s, e), "cafe\u{301}s");
+}
+
+#[test]
 fn triple_click_selects_line() {
     let mut st = state("first line\nsecond line\nthird line\n");
     st.mode = Mode::Rendered;

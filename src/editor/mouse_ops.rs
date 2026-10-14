@@ -18,7 +18,7 @@ pub use selection::visual_selection_to_rendered_text;
 use std::time::Duration;
 
 use crate::document::wrap;
-use crate::document::{row_map, Selection, VisualSelection};
+use crate::document::{row_map, str_next_grapheme, str_prev_grapheme, Selection, VisualSelection};
 use crate::editor::list_edit;
 use crate::editor::table_edit_ops;
 use crate::editor::{EditorState, Mode};
@@ -325,9 +325,14 @@ fn preview_word_range(
     if let Some(range) = word_range_around(chars.len(), clamped, |i| chars[i]) {
         return Some(range);
     }
-    // On whitespace, select the single char so the double-click still gives visible feedback.
+    // On whitespace, select the glyph under the click (a space and any mark it carries) so the
+    // double-click still gives visible feedback.
     if clamped < chars.len() {
-        Some((clamped, clamped + 1))
+        let text: String = chars.iter().collect();
+        Some((
+            str_prev_grapheme(&text, clamped + 1),
+            str_next_grapheme(&text, clamped),
+        ))
     } else {
         None
     }
@@ -970,6 +975,32 @@ mod tests {
                 anchor: 6,
                 active: 11
             })
+        );
+    }
+
+    #[test]
+    fn preview_double_click_keeps_a_combining_mark_in_the_word() {
+        let text = "x cafe\u{301}s y\n";
+        let mut state = EditorState::new(Buffer::from_str(text), theme());
+        state.mode = Mode::Preview;
+        assert_eq!(preview_word_range(&state, 0, 3), Some((2, 8)));
+        assert_eq!(
+            preview_word_range(&state, 0, 6),
+            Some((2, 8)),
+            "on the mark itself"
+        );
+    }
+
+    #[test]
+    fn preview_double_click_on_a_space_takes_the_mark_it_carries() {
+        let text = "a  \u{301} b\n";
+        let mut state = EditorState::new(Buffer::from_str(text), theme());
+        state.mode = Mode::Preview;
+        assert_eq!(preview_word_range(&state, 0, 2), Some((2, 4)));
+        assert_eq!(
+            preview_word_range(&state, 0, 3),
+            Some((2, 4)),
+            "on the mark itself"
         );
     }
 

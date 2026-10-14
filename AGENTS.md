@@ -178,8 +178,10 @@ src/
     buffer.rs       # Buffer over ropey::Rope; file I/O + edit primitives
     cursor.rs       # rope char offset + preferred visual column
     graphemes.rs, visual_cache.rs, selection.rs, source_map.rs
-                    #   grapheme steps; memoised visual-row counts; Selection +
-                    #   VisualSelection; block byte-range ↔ rendered-line mapping
+                    #   grapheme steps + class_at (the one word definition, shared by
+                    #   vim motions / objects and double-click); memoised visual-row
+                    #   counts; Selection + VisualSelection; block byte-range ↔
+                    #   rendered-line mapping
     history.rs      # undo/redo stack of EditDelta; merges inserts into word-groups
     parsed_doc.rs   # re-parse on change; caches AST + source map + row origins;
                     #   virtual blank blocks

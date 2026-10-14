@@ -3,7 +3,8 @@
 //! user-perceived characters (ZWJ sequences, modifiers, combining marks) rather than scalar values.
 //! The `str_*` helpers do the same over a short `String` (a text field's value), char-indexed
 //! like the rope versions; they segment the whole value, so an index inside a cluster still
-//! steps to that cluster's edges.
+//! steps to that cluster's edges.  [`class_at`] is the one definition of a word, shared by
+//! vim's word motions and objects and the mouse double-click.
 
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -97,6 +98,71 @@ fn str_boundaries(s: &str) -> impl Iterator<Item = usize> + '_ {
         Some(*chars)
     });
     std::iter::once(0).chain(ends)
+}
+
+// ── Word class ──────────────────────────────────────────────────────────────────
+
+/// Character class for word boundaries: vim's `w`/`e`/`b` and a double-click separate word
+/// characters (alphanumeric + `_`) from punctuation, while `W`/`E`/`B` (`big`) treat every
+/// non-blank as one class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Class {
+    Blank,
+    Word,
+    Punct,
+}
+
+fn class(c: char, big: bool) -> Class {
+    if c.is_whitespace() {
+        Class::Blank
+    } else if big || c.is_alphanumeric() || c == '_' {
+        Class::Word
+    } else {
+        Class::Punct
+    }
+}
+
+/// The [`Class`] of the char at `i`: the class of the first char of its glyph, so a glyph
+/// never straddles a word boundary (a decomposed `cafe\u{301}` is one word).  `get_char`
+/// indexes a rope or a rendered row alike.
+///
+/// The glyph start is found pairwise ([`joins_previous`]), so a mark after a space is blank,
+/// as in vim, while one after a control char classes by itself.  The walk back is capped at
+/// [`GRAPHEME_WINDOW`] to keep scans over a long run of marks linear; past that a mark
+/// classes by itself, splitting "zalgo" text where the grapheme helpers split it too.
+pub(crate) fn class_at(i: usize, big: bool, get_char: impl Fn(usize) -> char) -> Class {
+    let floor = i.saturating_sub(GRAPHEME_WINDOW);
+    let mut base = i;
+    let mut c = get_char(i);
+    while base > floor {
+        let prev = get_char(base - 1);
+        if !joins_previous(prev, c) {
+            break;
+        }
+        base -= 1;
+        c = prev;
+    }
+    class(c, big)
+}
+
+/// [`class_at`] over `buf`'s rope.
+pub(crate) fn class_of(buf: &Buffer, offset: usize, big: bool) -> Class {
+    let rope = buf.rope();
+    class_at(offset, big, |i| rope.char(i))
+}
+
+/// Do `prev` and `c` form one grapheme cluster on their own?  Pairwise, so the rules that
+/// need longer context (a ZWJ emoji sequence, regional-indicator pairs) can answer "no"
+/// inside one glyph — harmless here, since every char of such a glyph is punctuation.
+fn joins_previous(prev: char, c: char) -> bool {
+    if prev.is_ascii() && c.is_ascii() {
+        return prev == '\r' && c == '\n';
+    }
+    let mut buf = [0u8; 8];
+    let n = prev.encode_utf8(&mut buf).len();
+    let n = n + c.encode_utf8(&mut buf[n..]).len();
+    let pair = std::str::from_utf8(&buf[..n]).expect("two encoded chars are valid UTF-8");
+    pair.graphemes(true).nth(1).is_none()
 }
 
 #[cfg(test)]
@@ -287,5 +353,58 @@ mod tests {
                 }
             }
         }
+    }
+
+    // ── class_at ──────────────────────────────────────────────────────────────
+
+    fn class_in(text: &str, i: usize) -> Class {
+        let chars: Vec<char> = text.chars().collect();
+        class_at(i, false, |j| chars[j])
+    }
+
+    #[test]
+    fn class_at_gives_a_mark_the_class_of_the_char_it_marks() {
+        assert_eq!(class_in("e\u{301}", 1), Class::Word);
+        assert_eq!(class_in("❤\u{FE0F}", 1), Class::Punct);
+        assert_eq!(class_in("e\u{301}\u{302}", 2), Class::Word, "stacked marks");
+        // After a space the mark joins the space's glyph; after a control char it stands alone.
+        assert_eq!(class_in(" \u{301}", 1), Class::Blank);
+        assert_eq!(class_in("a\n\u{301}", 2), Class::Punct);
+        assert_eq!(class_in("a\t\u{301}", 2), Class::Punct);
+    }
+
+    #[test]
+    fn class_at_treats_zero_width_joiners_as_extending() {
+        assert_eq!(class_in("a\u{200D}", 1), Class::Word);
+        assert_eq!(class_in("a\u{200C}", 1), Class::Word);
+        assert_eq!(class_in("👨\u{200D}👩", 1), Class::Punct);
+    }
+
+    #[test]
+    fn class_at_gives_every_char_of_a_glyph_its_first_chars_class() {
+        // A skin tone (Sk) after a letter, and a digit after a Prepend number sign, join the
+        // glyph without being marks.
+        assert_eq!(class_in("a\u{1F3FD}", 1), Class::Word);
+        assert_eq!(class_in("\u{600}1", 1), Class::Punct);
+        assert_eq!(class_in("\r\n", 1), Class::Blank);
+        assert_eq!(class_in("ab", 1), Class::Word, "ASCII never joins");
+    }
+
+    #[test]
+    fn class_at_walk_back_is_bounded_over_a_long_run_of_marks() {
+        // Untrusted "zalgo" text: classing every char of the run used to re-walk it to the
+        // base each time, quadratic in its length (seconds for a few thousand marks).
+        let n = 10_000;
+        let chars: Vec<char> = std::iter::once('e')
+            .chain(std::iter::repeat_n('\u{301}', n))
+            .collect();
+        let reads = std::cell::Cell::new(0usize);
+        for i in 0..chars.len() {
+            class_at(i, false, |j| {
+                reads.set(reads.get() + 1);
+                chars[j]
+            });
+        }
+        assert!(reads.get() <= chars.len() * (2 * GRAPHEME_WINDOW + 2));
     }
 }

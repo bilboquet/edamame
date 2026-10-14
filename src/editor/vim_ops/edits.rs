@@ -5,7 +5,9 @@
 //! (`3>>`, `3J`, `3rx`).  All take plain values rather than vim types, so this
 //! editor-layer module needs no `use crate::input`.
 
-use crate::document::{next_grapheme_offset, EditDelta};
+use unicode_segmentation::UnicodeSegmentation;
+
+use crate::document::{next_grapheme_offset, prev_grapheme_offset, Buffer, EditDelta};
 use crate::editor::edit_ops::{apply_byte_delta, cursor_byte};
 use crate::editor::list_edit;
 use crate::editor::vim_ops::motion::{first_non_blank, line_end_offset};
@@ -42,11 +44,8 @@ fn paste_charwise(editor: &mut EditorState, text: &str, after: bool) {
         removed: String::new(),
         inserted: text.to_owned(),
     });
-    // `apply_delta` parks past the inserted text; vim leaves the cursor on its last char.
-    editor.cursor.offset = (insert_at + inserted_chars)
-        .saturating_sub(1)
-        .max(insert_at)
-        .min(editor.buffer.len_chars());
+    // `apply_delta` parks past the inserted text; vim leaves the cursor on its last glyph.
+    editor.cursor.offset = last_glyph_of(&editor.buffer, insert_at, insert_at + inserted_chars);
     editor.cursor.preferred_col = editor.cursor.cell_col(&editor.buffer);
     editor.update_cursor_block();
 }
@@ -89,18 +88,17 @@ fn paste_linewise(editor: &mut EditorState, text: &str, after: bool) {
 
 // ── Replace / toggle-case ───────────────────────────────────────────────────────
 
-/// `r{c}`: replace `count` characters at the cursor with `c`, in one delta, landing on
-/// the last one.  A no-op when fewer than `count` remain on the line — `r` never replaces
-/// the newline or spills onto the next line.
+/// `r{c}`: replace `count` glyphs (grapheme clusters) at the cursor with one `c` each, in
+/// one delta, landing on the last one.  A no-op when fewer than `count` remain on the line —
+/// `r` never replaces the newline or spills onto the next line.
 pub fn replace_char(editor: &mut EditorState, c: char, count: u32) {
     let count = count.max(1) as usize;
     let cursor = editor.cursor.offset;
-    let line = editor.buffer.char_to_line(cursor);
-    let line_end = line_end_offset(&editor.buffer, line);
-    if cursor + count > line_end {
+    let (end, taken) = glyphs_on_line(&editor.buffer, cursor, count);
+    if taken < count {
         return;
     }
-    let removed = editor.buffer.slice_to_string(cursor, cursor + count);
+    let removed = editor.buffer.slice_to_string(cursor, end);
     let inserted: String = std::iter::repeat_n(c, count).collect();
     editor.apply_delta(EditDelta {
         offset: cursor,
@@ -112,25 +110,23 @@ pub fn replace_char(editor: &mut EditorState, c: char, count: u32) {
     editor.update_cursor_block();
 }
 
-/// `~`: toggle the case of `count` characters at the cursor (clamped to the line content)
-/// in one delta, then advance past them.  Non-cased characters pass through.
+/// `~`: toggle the case of `count` glyphs (grapheme clusters) at the cursor (clamped to the
+/// line content) in one delta, then advance past them.  Non-cased characters pass through.
 pub fn toggle_case(editor: &mut EditorState, count: u32) {
     let count = count.max(1) as usize;
     let cursor = editor.cursor.offset;
-    let line = editor.buffer.char_to_line(cursor);
-    let line_end = line_end_offset(&editor.buffer, line);
-    let n = count.min(line_end.saturating_sub(cursor));
-    if n == 0 {
+    let (end, _) = glyphs_on_line(&editor.buffer, cursor, count);
+    if end == cursor {
         return;
     }
-    let removed = editor.buffer.slice_to_string(cursor, cursor + n);
+    let removed = editor.buffer.slice_to_string(cursor, end);
     let inserted: String = removed.chars().map(toggle_case_char).collect();
     editor.apply_delta(EditDelta {
         offset: cursor,
         removed,
         inserted,
     });
-    editor.cursor.offset = (cursor + n).min(line_end);
+    editor.cursor.offset = end;
     editor.cursor.preferred_col = editor.cursor.cell_col(&editor.buffer);
     editor.update_cursor_block();
 }
@@ -194,9 +190,12 @@ pub fn replace_char_range(editor: &mut EditorState, start: usize, end: usize, c:
         return;
     }
     let removed = editor.buffer.slice_to_string(start, end);
+    // One `c` per glyph, so `❤\u{FE0F}` becomes a single `c`, as in vim.  A line break is
+    // kept whole: `\r\n` is one glyph, and replacing it would join the lines.
+    let c = c.to_string();
     let inserted: String = removed
-        .chars()
-        .map(|ch| if ch == '\n' { '\n' } else { c })
+        .graphemes(true)
+        .map(|g| if g.ends_with('\n') { g } else { &c })
         .collect();
     editor.apply_delta(EditDelta {
         offset: start,
@@ -225,10 +224,7 @@ pub fn replace_range_with(editor: &mut EditorState, start: usize, end: usize, te
         removed,
         inserted: text.to_owned(),
     });
-    editor.cursor.offset = (start + inserted_chars)
-        .saturating_sub(1)
-        .max(start)
-        .min(editor.buffer.len_chars());
+    editor.cursor.offset = last_glyph_of(&editor.buffer, start, start + inserted_chars);
     editor.cursor.preferred_col = editor.cursor.cell_col(&editor.buffer);
     editor.update_cursor_block();
 }
@@ -251,6 +247,30 @@ fn force_case_char(c: char, upper: bool) -> char {
     } else {
         c.to_lowercase().next().unwrap_or(c)
     }
+}
+
+/// End of up to `count` glyphs (grapheme clusters) from `cursor`, never past its line's
+/// content, and how many glyphs that took: fewer than `count` when the line ran out.
+fn glyphs_on_line(buf: &Buffer, cursor: usize, count: usize) -> (usize, usize) {
+    let line_end = line_end_offset(buf, buf.char_to_line(cursor));
+    let mut end = cursor;
+    let mut taken = 0;
+    while taken < count && end < line_end {
+        end = next_grapheme_offset(buf, end).min(line_end);
+        taken += 1;
+    }
+    (end, taken)
+}
+
+/// Start of the glyph holding the last char inserted at `[start, end)`, or `start` when that
+/// is empty: where vim leaves the cursor after a paste.  This can be before `start`, when
+/// the text opens with a combining mark that joins the glyph before it.
+fn last_glyph_of(buf: &Buffer, start: usize, end: usize) -> usize {
+    let end = end.min(buf.len_chars());
+    if end <= start {
+        return start.min(buf.len_chars());
+    }
+    prev_grapheme_offset(buf, end)
 }
 
 // ── Join ────────────────────────────────────────────────────────────────────────

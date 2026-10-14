@@ -9,8 +9,8 @@
 
 use std::ops::Range;
 
-use crate::document::Buffer;
-use crate::editor::vim_ops::motion::{class, line_end_offset, Class};
+use crate::document::{class_of, Buffer, Class};
+use crate::editor::vim_ops::motion::line_end_offset;
 
 /// A resolved text object, carrying the inner (`i`) / around (`a`) flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,19 +60,19 @@ fn word_object(buf: &Buffer, cursor: usize, inner: bool, big: bool) -> Option<Ra
     if ch(buf, cursor) == '\n' {
         return None;
     }
-    let cls = class(ch(buf, cursor), big);
+    let cls = class_of(buf, cursor, big);
 
     let mut start = cursor;
     while start > 0 {
         let p = start - 1;
-        if ch(buf, p) == '\n' || class(ch(buf, p), big) != cls {
+        if ch(buf, p) == '\n' || class_of(buf, p, big) != cls {
             break;
         }
         start = p;
     }
     let mut end = cursor + 1;
     while end < len {
-        if ch(buf, end) == '\n' || class(ch(buf, end), big) != cls {
+        if ch(buf, end) == '\n' || class_of(buf, end, big) != cls {
             break;
         }
         end += 1;
@@ -84,20 +84,20 @@ fn word_object(buf: &Buffer, cursor: usize, inner: bool, big: bool) -> Option<Ra
 
     if cls != Class::Blank {
         let mut e = end;
-        while e < len && ch(buf, e) != '\n' && ch(buf, e).is_whitespace() {
+        while e < len && ch(buf, e) != '\n' && class_of(buf, e, big) == Class::Blank {
             e += 1;
         }
         if e > end {
             return Some(start..e);
         }
         let mut s = start;
-        while s > 0 && ch(buf, s - 1) != '\n' && ch(buf, s - 1).is_whitespace() {
+        while s > 0 && ch(buf, s - 1) != '\n' && class_of(buf, s - 1, big) == Class::Blank {
             s -= 1;
         }
         Some(s..end)
     } else {
         let mut e = end;
-        while e < len && ch(buf, e) != '\n' && class(ch(buf, e), big) != Class::Blank {
+        while e < len && ch(buf, e) != '\n' && class_of(buf, e, big) != Class::Blank {
             e += 1;
         }
         Some(start..e)

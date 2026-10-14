@@ -7,7 +7,7 @@
 
 use std::ops::Range;
 
-use crate::document::{next_grapheme_offset, Buffer};
+use crate::document::{class_of, next_grapheme_offset, prev_grapheme_offset, Buffer, Class};
 
 /// Which character-find motion a [`Motion::FindChar`] carries, also recorded in
 /// `VimState::last_find` for `;` / `,` to replay.  Defined in the editor layer,
@@ -62,28 +62,18 @@ pub enum OpRange {
     Lines { first: usize, last: usize },
 }
 
-/// Character class for word motions: `w`/`e`/`b` separate word characters
-/// (alphanumeric + `_`) from punctuation, while `W`/`E`/`B` treat every
-/// non-blank as one class.  Shared with `text_object`'s `iw`/`aw`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Class {
-    Blank,
-    Word,
-    Punct,
-}
-
-pub(crate) fn class(c: char, big: bool) -> Class {
-    if c.is_whitespace() {
-        Class::Blank
-    } else if big || c.is_alphanumeric() || c == '_' {
-        Class::Word
-    } else {
-        Class::Punct
-    }
-}
-
 fn char_at(buf: &Buffer, offset: usize) -> char {
     buf.rope().char(offset)
+}
+
+/// Start of the grapheme cluster holding `offset`, so a motion that lands on the last char
+/// of a run (`e`) or one char short of a match (`t`) never parks inside `❤\u{FE0F}` or a
+/// ZWJ family, where the next `x` would break it apart.
+fn cluster_start(buf: &Buffer, offset: usize) -> usize {
+    if offset >= buf.len_chars() {
+        return offset;
+    }
+    prev_grapheme_offset(buf, offset + 1)
 }
 
 /// Resolve `motion` to a target char offset, starting from `cursor`.
@@ -219,7 +209,7 @@ fn step_horizontal(buf: &Buffer, cursor: usize, count: u32, forward: bool) -> us
             if pos <= bound {
                 break;
             }
-            pos = crate::document::prev_grapheme_offset(buf, pos);
+            pos = prev_grapheme_offset(buf, pos);
         }
     }
     pos
@@ -232,41 +222,40 @@ fn word_forward(buf: &Buffer, mut pos: usize, count: u32, big: bool) -> usize {
         if pos >= len {
             break;
         }
-        let start = class(char_at(buf, pos), big);
+        let start = class_of(buf, pos, big);
         if start != Class::Blank {
-            while pos < len && class(char_at(buf, pos), big) == start {
+            while pos < len && class_of(buf, pos, big) == start {
                 pos += 1;
             }
         }
-        while pos < len && class(char_at(buf, pos), big) == Class::Blank {
+        while pos < len && class_of(buf, pos, big) == Class::Blank {
             pos += 1;
         }
     }
     pos
 }
 
-/// `e` / `E`: move to the end (last char) of the next word.
+/// `e` / `E`: move to the end (last glyph) of the next word.
 fn word_end(buf: &Buffer, mut pos: usize, count: u32, big: bool) -> usize {
     let len = buf.len_chars();
     if len == 0 {
         return 0;
     }
+    let last = cluster_start(buf, len - 1);
     for _ in 0..count {
-        if pos + 1 >= len {
-            return len.saturating_sub(1);
-        }
-        // Advance at least one, then skip blanks into the word.
-        pos += 1;
-        while pos < len && class(char_at(buf, pos), big) == Class::Blank {
+        // Advance at least one glyph, then skip blanks into the word.
+        pos = next_grapheme_offset(buf, pos);
+        while pos < len && class_of(buf, pos, big) == Class::Blank {
             pos += 1;
         }
         if pos >= len {
-            return len.saturating_sub(1);
+            return last;
         }
-        let cls = class(char_at(buf, pos), big);
-        while pos + 1 < len && class(char_at(buf, pos + 1), big) == cls {
+        let cls = class_of(buf, pos, big);
+        while pos + 1 < len && class_of(buf, pos + 1, big) == cls {
             pos += 1;
         }
+        pos = cluster_start(buf, pos);
     }
     pos
 }
@@ -282,11 +271,12 @@ fn current_word_end(buf: &Buffer, cursor: usize, count: u32, big: bool) -> usize
         return cursor;
     }
     let mut pos = cursor;
-    let cls = class(char_at(buf, pos), big);
+    let cls = class_of(buf, pos, big);
     if cls != Class::Blank {
-        while pos + 1 < len && class(char_at(buf, pos + 1), big) == cls {
+        while pos + 1 < len && class_of(buf, pos + 1, big) == cls {
             pos += 1;
         }
+        pos = cluster_start(buf, pos);
     }
     // Remaining words use `e` semantics, so the current word is the first.
     if count > 1 {
@@ -302,15 +292,15 @@ fn word_backward(buf: &Buffer, mut pos: usize, count: u32, big: bool) -> usize {
             break;
         }
         pos -= 1;
-        while pos > 0 && class(char_at(buf, pos), big) == Class::Blank {
+        while pos > 0 && class_of(buf, pos, big) == Class::Blank {
             pos -= 1;
         }
-        if class(char_at(buf, pos), big) == Class::Blank {
+        let cls = class_of(buf, pos, big);
+        if cls == Class::Blank {
             // Reached the buffer start over blanks only.
             break;
         }
-        let cls = class(char_at(buf, pos), big);
-        while pos > 0 && class(char_at(buf, pos - 1), big) == cls {
+        while pos > 0 && class_of(buf, pos - 1, big) == cls {
             pos -= 1;
         }
     }
@@ -320,8 +310,11 @@ fn word_backward(buf: &Buffer, mut pos: usize, count: u32, big: bool) -> usize {
 // ── Find / paragraph / matching-pair motions ──────────────────────────────────
 
 /// `f`/`F`/`t`/`T`: the `count`-th occurrence of `target` on the cursor's line,
-/// with `t`/`T` stopping one char short.  Bounded to the line; a miss leaves the
-/// cursor put.
+/// with `t`/`T` stopping one glyph short.  Bounded to the line; a miss leaves the
+/// cursor put.  The scan steps by grapheme cluster and matches only a cluster that is
+/// `target` alone, so no find lands inside a cluster, `fe` skips a decomposed `e\u{301}`
+/// just as it skips a precomposed `é`, and `f❤` skips the emoji `❤\u{FE0F}` — unlike vim,
+/// which matches a cluster's first char.
 ///
 /// `skip_adjacent` is set only for a `;`/`,` repeat of `t`/`T`: it steps over a
 /// match sitting immediately in the search direction, so a repeat advances
@@ -341,33 +334,37 @@ fn find_char(
     let lend = line_end_offset(buf, line);
     let forward = matches!(kind, FindKind::Forward | FindKind::ForwardTill);
     let till = matches!(kind, FindKind::ForwardTill | FindKind::BackwardTill);
+    let is_target = |i: usize| char_at(buf, i) == target && next_grapheme_offset(buf, i) == i + 1;
     let mut hits = 0;
     let found = if forward {
         let mut pos = None;
-        let mut i = cursor + 1;
-        if skip_adjacent && till && i < lend && char_at(buf, i) == target {
-            i += 1;
+        let mut i = next_grapheme_offset(buf, cursor);
+        if skip_adjacent && till && i < lend && is_target(i) {
+            i = next_grapheme_offset(buf, i);
         }
         while i < lend {
-            if char_at(buf, i) == target {
+            if is_target(i) {
                 hits += 1;
                 if hits == count {
                     pos = Some(i);
                     break;
                 }
             }
-            i += 1;
+            i = next_grapheme_offset(buf, i);
         }
         pos
     } else {
         let mut pos = None;
         let mut i = cursor;
-        if skip_adjacent && till && i > lstart && char_at(buf, i - 1) == target {
-            i -= 1;
+        if skip_adjacent && till && i > lstart {
+            let prev = prev_grapheme_offset(buf, i).max(lstart);
+            if is_target(prev) {
+                i = prev;
+            }
         }
         while i > lstart {
-            i -= 1;
-            if char_at(buf, i) == target {
+            i = prev_grapheme_offset(buf, i).max(lstart);
+            if is_target(i) {
                 hits += 1;
                 if hits == count {
                     pos = Some(i);
@@ -379,10 +376,10 @@ fn find_char(
     };
     match (found, kind) {
         (Some(p), FindKind::Forward | FindKind::Backward) => p,
-        // `t` lands one before the match (never behind the cursor); `T`
-        // lands one after (never past the cursor).
-        (Some(p), FindKind::ForwardTill) => p.saturating_sub(1).max(cursor),
-        (Some(p), FindKind::BackwardTill) => (p + 1).min(cursor),
+        // `t` lands one glyph before the match (never behind the cursor); `T`
+        // one glyph after (never past the cursor).
+        (Some(p), FindKind::ForwardTill) => prev_grapheme_offset(buf, p).max(cursor),
+        (Some(p), FindKind::BackwardTill) => next_grapheme_offset(buf, p).min(cursor),
         (None, _) => cursor,
     }
 }
@@ -893,5 +890,11 @@ mod tests {
             resolve_motion_range(Motion::MatchingPair, 1, 4, &b),
             OpRange::Chars(0..5)
         );
+    }
+
+    #[test]
+    fn word_forward_skips_a_mark_that_joins_a_space() {
+        // ` \u{301}` is one glyph; `w` must land on `b`, not inside it on the mark.
+        assert_eq!(m(Motion::WordForward, 0, "a \u{301}b"), 3);
     }
 }

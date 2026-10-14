@@ -11,6 +11,7 @@ pub mod wrap;
 
 pub use buffer::{Buffer, LineEnding};
 pub use cursor::Cursor;
+pub(crate) use graphemes::{class_at, class_of, Class};
 pub use graphemes::{
     next_grapheme_offset, prev_grapheme_offset, str_byte_index, str_next_grapheme,
     str_prev_grapheme, str_remove_grapheme_at, str_remove_grapheme_before,

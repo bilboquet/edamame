@@ -1428,6 +1428,223 @@ fn tilde_passes_non_cased_chars_through_unchanged() {
     assert_eq!(st.cursor.offset, 3, "cursor advances over the whole run");
 }
 
+// ── Grapheme clusters: edits and motions step whole glyphs ──────────────────────
+
+/// Feed `keys` (one char per key) to a fresh editor over `text` with the cursor at char
+/// `cursor`, returning the buffer and the cursor's final char offset.
+fn run_keys(text: &str, cursor: usize, keys: &str) -> (String, usize) {
+    let mut st = state(text);
+    let mut vim = VimState::default();
+    st.cursor.offset = cursor;
+    for c in keys.chars() {
+        feed(&mut vim, &mut st, ch(c));
+    }
+    (st.buffer.contents(), st.cursor.offset)
+}
+
+#[test]
+fn r_replaces_a_whole_grapheme_cluster() {
+    // A variation-selector emoji, a skin-toned emoji, and a decomposed `é` are each one
+    // glyph; `r` used to replace only their first code point.
+    for text in ["❤\u{FE0F}a", "👍🏽a", "e\u{301}a"] {
+        assert_eq!(run_keys(text, 0, "rx"), ("xa".to_owned(), 0), "in {text:?}");
+    }
+    assert_eq!(run_keys("❤\u{FE0F}👍🏽a", 0, "2rx"), ("xxa".to_owned(), 1));
+    assert_eq!(
+        run_keys("❤\u{FE0F}", 0, "2rx").0,
+        "❤\u{FE0F}",
+        "only one glyph remains"
+    );
+}
+
+#[test]
+fn tilde_toggles_and_steps_over_a_whole_grapheme_cluster() {
+    assert_eq!(run_keys("❤\u{FE0F}a", 0, "~"), ("❤\u{FE0F}a".to_owned(), 2));
+    assert_eq!(run_keys("e\u{301}a", 0, "2~"), ("E\u{301}A".to_owned(), 3));
+}
+
+#[test]
+fn word_end_lands_on_a_clusters_first_char() {
+    // `e` used to park on the U+FE0F (or the family's last member), and `x` then broke the
+    // emoji apart.
+    assert_eq!(
+        run_keys("ab ❤\u{FE0F} cd", 0, "ee"),
+        ("ab ❤\u{FE0F} cd".to_owned(), 3)
+    );
+    assert_eq!(run_keys("ab ❤\u{FE0F} cd", 0, "eex").0, "ab  cd");
+    let family = "👨\u{200D}👩\u{200D}👧";
+    let text = format!("ab {family} cd");
+    assert_eq!(run_keys(&text, 0, "ee").1, 3);
+    assert_eq!(run_keys(&text, 0, "eex").0, "ab  cd");
+    // From the emoji, the next `e` moves on rather than sticking on it.
+    assert_eq!(run_keys("ab ❤\u{FE0F} cd", 3, "e").1, 7);
+    // A buffer ending in a cluster: `e` stops on its first char, not its last.
+    assert_eq!(run_keys("a ❤\u{FE0F}", 0, "e").1, 2);
+}
+
+#[test]
+fn till_stops_one_glyph_short_of_the_match() {
+    assert_eq!(run_keys("a❤\u{FE0F}x", 0, "tx").1, 1);
+    assert_eq!(run_keys("x❤\u{FE0F}a", 3, "Tx").1, 1);
+    // `f` matches only a glyph that is the target alone: not an emoji's first char, nor
+    // the base letter of a decomposed accent.
+    assert_eq!(run_keys("ab❤\u{FE0F}c❤", 0, "f❤").1, 5);
+    assert_eq!(run_keys("xe\u{301}e", 0, "fe").1, 3);
+    assert_eq!(
+        run_keys("xe\u{301}", 0, "fe").1,
+        0,
+        "no bare `e`: the cursor stays"
+    );
+    // `;` after `t` skips the adjacent match across a cluster.
+    assert_eq!(run_keys("a❤\u{FE0F}x❤\u{FE0F}x", 0, "tx;").1, 4);
+}
+
+#[test]
+fn backward_finds_step_whole_grapheme_clusters() {
+    // `F` matches only a glyph that is the target alone, never stopping inside one.
+    assert_eq!(run_keys("❤❤\u{FE0F}ab", 4, "F❤").1, 0);
+    assert_eq!(
+        run_keys("e\u{301}a", 2, "Fe").1,
+        2,
+        "no bare `e`: the cursor stays"
+    );
+    assert_eq!(run_keys("x❤\u{FE0F}x❤\u{FE0F}a", 6, "2Fx").1, 0);
+    // `;` after `T` skips the adjacent match across a cluster.
+    assert_eq!(run_keys("x❤\u{FE0F}x❤\u{FE0F}a", 6, "Tx;").1, 1);
+}
+
+#[test]
+fn word_motions_keep_a_combining_mark_with_its_letter() {
+    // U+0301 isn't alphanumeric, so it used to count as punctuation and split the word.
+    assert_eq!(run_keys("cafe\u{301} bar", 0, "w").1, 6);
+    assert_eq!(run_keys("cafe\u{301} bar", 6, "b").1, 0);
+    assert_eq!(run_keys("cafe\u{301}s bar", 0, "e").1, 5);
+    assert_eq!(run_keys("cafe\u{301}s bar", 0, "dw").0, "bar");
+    assert_eq!(run_keys("cafe\u{301}s bar", 0, "cw").0, " bar");
+    assert_eq!(run_keys("cafe\u{301}s bar", 2, "diw").0, " bar");
+    // An emoji's variation selector stays in the emoji's punctuation run.
+    assert_eq!(run_keys("❤\u{FE0F} ab", 0, "w").1, 3);
+}
+
+#[test]
+fn word_motions_never_split_a_glyph_of_two_classes() {
+    // A skin tone after a letter, and a digit after an Arabic number sign, join one glyph
+    // without being marks; `w` used to stop between them and `dw` to split the glyph.
+    assert_eq!(run_keys("a\u{1F3FD} b", 0, "w").1, 3);
+    assert_eq!(run_keys("a\u{1F3FD} b", 0, "dw").0, "b");
+    assert_eq!(run_keys("\u{600}1 b", 0, "w").1, 3);
+}
+
+#[test]
+fn visual_r_replaces_each_glyph_once() {
+    assert_eq!(run_keys("❤\u{FE0F}a", 0, "vlrx").0, "xx");
+    // Line breaks inside the selection survive.
+    assert_eq!(run_keys("ab\ncd", 0, "vjlrx").0, "xx\nxx");
+}
+
+#[test]
+fn paste_lands_on_the_last_pasted_glyph() {
+    // `yl` yanks the whole emoji; the cursor ends on its first char, not inside it.
+    assert_eq!(
+        run_keys("❤\u{FE0F}b", 0, "ylP"),
+        ("❤\u{FE0F}❤\u{FE0F}b".to_owned(), 0)
+    );
+}
+
+#[test]
+fn paste_of_a_lone_mark_lands_on_the_glyph_it_joins() {
+    // A clipboard holding just U+0301, pasted after `e`, becomes part of `e`'s glyph; the
+    // cursor used to land on the mark, inside it.
+    let mut st = state("ex");
+    let mut vim = VimState::default();
+    vim.register.text = "\u{301}".to_owned();
+    vim.register.linewise = false;
+    feed(&mut vim, &mut st, ch('p'));
+    assert_eq!(st.buffer.contents(), "e\u{301}x");
+    assert_eq!(st.cursor.offset, 0);
+}
+
+#[test]
+fn de_deletes_a_trailing_combining_mark_with_its_letter() {
+    // `e` lands on the `e` of `e\u{301}`; the inclusive range must still take the accent.
+    assert_eq!(run_keys("cafe\u{301} x", 0, "de").0, " x");
+    assert_eq!(run_keys("a ❤\u{FE0F} x", 0, "de").0, " x");
+}
+
+#[test]
+fn dt_deletes_a_multi_char_glyph_before_the_match() {
+    assert_eq!(run_keys("a❤\u{FE0F}x", 0, "dtx").0, "x");
+    assert_eq!(run_keys("ae\u{301}x", 0, "dtx").0, "x");
+    assert_eq!(run_keys("x❤\u{FE0F}a", 3, "dTx").0, "xa");
+}
+
+#[test]
+fn aw_takes_a_mark_carried_by_the_surrounding_space() {
+    // ` \u{301}` is one blank glyph; `aw` used to stop at the mark and leave it orphaned.
+    assert_eq!(run_keys("ab \u{301}cd", 0, "daw").0, "cd");
+    assert_eq!(run_keys("ab \u{301}cd", 4, "daw").0, "ab");
+}
+
+/// Glyphs that are more than one code point, plus plain letters, blanks and punctuation, so
+/// the generated text puts every multi-char cluster next to every word-class boundary.
+const GLYPHS: &[&str] = &[
+    "a",
+    "x",
+    "e\u{301}",
+    "❤\u{FE0F}",
+    "👍🏽",
+    "👨\u{200D}👩\u{200D}👧",
+    "a\u{1F3FD}",
+    "\u{600}1",
+    " ",
+    " \u{301}",
+    ".",
+    "\n",
+];
+
+/// Motions and edits that step by glyph.  Each runs from a fresh `VimState`.
+const KEYS: &[&str] = &[
+    "w", "e", "b", "W", "E", "B", "tx", "Tx", "fx", "Fx", "tx;", "Tx,", "x", "rx", "2rx", "~",
+    "3~", "dw", "de", "db", "dtx", "dfx", "dTx", "dFx", "diw", "daw", "vlrx", "ylP", "yep",
+];
+
+fn glyphs_of(text: &str) -> Vec<&str> {
+    use unicode_segmentation::UnicodeSegmentation;
+    text.graphemes(true).collect()
+}
+
+proptest::proptest! {
+    #[test]
+    fn proptest_motions_and_edits_keep_glyphs_whole(
+        picks in proptest::collection::vec(0..GLYPHS.len(), 1..24),
+        start in 0usize..24,
+        keys in 0..KEYS.len(),
+    ) {
+        let text: String = picks.iter().map(|&i| GLYPHS[i]).collect();
+        // Start on a glyph boundary: the invariant is that no command leaves one.
+        let start: usize = picks[..start.min(picks.len() - 1)]
+            .iter()
+            .map(|&i| GLYPHS[i].chars().count())
+            .sum();
+        let (after, cursor) = run_keys(&text, start, KEYS[keys]);
+
+        let mut boundary = 0;
+        let mut boundaries = vec![0];
+        for g in glyphs_of(&after) {
+            // Every glyph left is a whole one from the input, case-toggled or replaced at most.
+            let whole = GLYPHS.iter().any(|&w| w == g || w.to_uppercase() == g);
+            proptest::prop_assert!(whole, "{:?} split a glyph: {after:?} has {g:?}", KEYS[keys]);
+            boundary += g.chars().count();
+            boundaries.push(boundary);
+        }
+        proptest::prop_assert!(
+            boundaries.contains(&cursor),
+            "{:?} on {text:?} from {start} left the cursor at {cursor}, inside a glyph of {after:?}",
+            KEYS[keys],
+        );
+    }
+}
+
 // ── CP4: join (`J`) ──────────────────────────────────────────────────────────────
 
 #[test]

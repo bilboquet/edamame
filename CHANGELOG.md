@@ -20,6 +20,7 @@ Each released version's section is also what ships as the GitHub release notes: 
 - Tables inside list items, blockquotes and footnotes, and tables without edge pipes or with short rows, now work like any other table: one-cell editing, Tab, row and column commands, and the mouse handles.
 - CJK text now wraps between characters, keeps punctuation such as `。` and `「` with its text, and no longer adds blank rows in code blocks. A reflowed paragraph no longer shows a space where a Chinese or Japanese line was wrapped in the source.
 - Accented letters and Korean text stored in decomposed form, common in files from macOS, now display correctly, and cursor keys in text fields move over a whole emoji or accented letter.
+- In vim mode, motions and edits no longer stop inside or split an emoji or an accented letter, a decomposed accent no longer ends a word for motions, `diw`, `*` or a double-click, and `f`/`t` no longer match the plain letter under a decomposed accent.
 - Fixed various layout bugs, mostly in lists, blockquotes, footnotes, tables and wrapped text: misplaced clicks, cursor, highlights and line numbers; missing or extra blank rows; and misaligned indentation.
 - HTML comments inside a list item, quote or footnote are now hidden, as they already were elsewhere.
 - A `---` further down a file that starts with frontmatter is no longer mistaken for more frontmatter.

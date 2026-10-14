@@ -1,6 +1,6 @@
 use ratatui::text::Line;
 
-use crate::document::{Selection, VisualSelection};
+use crate::document::{class_at, Class, Selection, VisualSelection};
 use crate::editor::table_edit;
 use crate::editor::table_edit_ops;
 use crate::editor::EditorState;
@@ -67,11 +67,12 @@ pub(super) fn expand_selection_to_inline_markers(
 }
 
 /// Word-boundary scan around char index `at` in a sequence of length `len` whose chars come from
-/// `get_char`: alphanumeric-or-`_` first, falling back to a punctuation run.  `None` when both
-/// passes collapse (whitespace with no adjacent word or punctuation).
+/// `get_char`: a word run first, falling back to a punctuation run.  `None` when both passes
+/// collapse (whitespace with no adjacent word or punctuation).
 ///
 /// The single definition of "word" for both the rope-offset path (`select_word_at_cursor`) and
-/// the Preview rendered-line path (`mouse_ops::apply`'s DoubleClick arm).
+/// the Preview rendered-line path (`mouse_ops::apply`'s DoubleClick arm), and the same one vim's
+/// `w` and `iw` use: [`class_at`], under which a combining mark belongs to the char it marks.
 pub(super) fn word_range_around<F>(len: usize, at: usize, get_char: F) -> Option<(usize, usize)>
 where
     F: Fn(usize) -> char,
@@ -80,14 +81,14 @@ where
         return None;
     }
     let at = at.min(len);
-    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let class = |i: usize| class_at(i, false, &get_char);
 
     let mut start = at;
-    while start > 0 && is_word(get_char(start - 1)) {
+    while start > 0 && class(start - 1) == Class::Word {
         start -= 1;
     }
     let mut end = at;
-    while end < len && is_word(get_char(end)) {
+    while end < len && class(end) == Class::Word {
         end += 1;
     }
     if start != end {
@@ -96,19 +97,11 @@ where
 
     // Punctuation fallback, so a double-click on `==` or `**` still selects something.
     let mut s2 = at;
-    while s2 > 0 {
-        let c = get_char(s2 - 1);
-        if c.is_whitespace() || is_word(c) {
-            break;
-        }
+    while s2 > 0 && class(s2 - 1) == Class::Punct {
         s2 -= 1;
     }
     let mut e2 = at;
-    while e2 < len {
-        let c = get_char(e2);
-        if c.is_whitespace() || is_word(c) {
-            break;
-        }
+    while e2 < len && class(e2) == Class::Punct {
         e2 += 1;
     }
     if s2 != e2 {
