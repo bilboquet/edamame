@@ -685,6 +685,14 @@ const CORPUS: &[&str] = &[
     // A hard break between CJK glyphs stays a space, in the paragraph's joined map too.
     "日本\\\n*語\n本* 語\n",
     "日本\n[](u)\n\nsee [](./dir/plan.md \"plan\") and [ ](#top)\n",
+    // A `$$` block opening a list item renders as a ` math ` block, as it does anywhere else
+    // (#72); a formula line behind a shorter prefix than its `$$` line's — a lazy continuation
+    // line, or `>x` under `> $$` — shows from its own column.
+    "- $$\n  x^2\n  y^2\n  $$\n",
+    ">- $$\n>  x^2\n>  $$\n",
+    "> $$\nx^2\n> $$\n",
+    "> $$\n>x^2\n> $$\n",
+    "- a\n\n  $$\n x^2\n  $$\n",
 ];
 
 #[test]
@@ -782,11 +790,10 @@ fn a_setext_h2_rule_shows_its_underline() {
 /// `r` shows the same position as the char before it (the fill past a code line, a back-link):
 /// every content char round-trips to the cell it was clicked on.  And every inline row *has* an
 /// exact map, or its overlays would paint nothing: a row without one is a construct the per-line
-/// maps misread.  Known exceptions: an image's `[Image: …]` placeholder; display math nested in
-/// a container, which isn't promoted and shows its formula on one row, newlines and all; and a
-/// row continuing a multi-line atomic inline (a code span), which keeps as much of the later
-/// line's indent as pulldown-cmark decides (the agreement test checks such a row by its letters
-/// and digits).  Table rows map their columns through `table_layout`'s cell geometry, not
+/// maps misread.  Known exceptions: an image's `[Image: …]` placeholder; and a row continuing a
+/// multi-line atomic inline (a code span), which keeps as much of the later line's indent as
+/// pulldown-cmark decides (the agreement test checks such a row by its letters and digits).
+/// Table rows map their columns through `table_layout`'s cell geometry, not
 /// `row_map`'s, and are skipped here; [`check_click_and_paint`] covers them.
 fn check_round_trip(doc: &ParsedDoc) -> Result<(), String> {
     for (abs, (line, origin)) in doc.lines.iter().zip(doc.row_origins()).enumerate() {
@@ -836,7 +843,6 @@ fn check_round_trip(doc: &ParsedDoc) -> Result<(), String> {
             });
             if !atomic_tail
                 && !shown.contains("[Image:")
-                && !shown.contains("$$")
                 && row_map::raw_to_rendered_col(doc, block, row, click(start)).is_none()
             {
                 return Err(format!("row {abs} {origin:?} {shown:?} has no exact map"));

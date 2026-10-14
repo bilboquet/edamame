@@ -191,7 +191,9 @@ mod positions {
 
     use edamame::markdown::ast::ListItem;
     use edamame::markdown::parse_offsets::DocParser;
-    use edamame::markdown::{parse_raw_with_ranges, Block, LineSpan, SrcLines};
+    use edamame::markdown::{
+        display_math_block_body, parse_raw_with_ranges, Block, LineSpan, SrcLines,
+    };
     use pulldown_cmark::{Event, Tag, TagEnd};
 
     struct Lines<'s> {
@@ -411,9 +413,17 @@ mod positions {
             check_block(child, base, n, content, src)?;
         }
         if let Some(lines) = block.src() {
-            check_src_lines(lines, base, content)?;
+            check_src_lines(lines, base, content, &formula_lines(block))?;
         }
         Ok(())
+    }
+
+    /// The formula of a paragraph that renders as a ` math ` block, per body line; empty for any
+    /// other block.
+    fn formula_lines(block: &Block) -> Vec<String> {
+        display_math_block_body(block).map_or_else(Vec::new, |body| {
+            body.split('\n').map(str::to_owned).collect()
+        })
     }
 
     fn check_item(
@@ -442,10 +452,35 @@ mod positions {
         Ok(())
     }
 
-    fn check_src_lines(lines: &SrcLines, base: usize, content: &Content) -> Result<(), String> {
+    /// `formula`: [`formula_lines`], whose line `k - 1` the leaf's line `k` holds.  pulldown-cmark
+    /// reports the formula as one atomic span, so its lines start no event; the recorded column
+    /// is the one the source line from which is the formula's.
+    fn check_src_lines(
+        lines: &SrcLines,
+        base: usize,
+        content: &Content,
+        formula: &[String],
+    ) -> Result<(), String> {
         for (k, col) in lines.cols().enumerate() {
             let line = base + lines.first as usize + k;
+            let formula_line = k.checked_sub(1).and_then(|i| formula.get(i));
             match col {
+                Some(col) if content.continues_atomic(line) => {
+                    let start = content.lines.starts[line];
+                    let end = content
+                        .lines
+                        .starts
+                        .get(line + 1)
+                        .map_or(content.lines.src.len(), |&next| next - 1);
+                    let text = content.lines.src[start..end].trim_end_matches('\r');
+                    let shown: String = text.chars().skip(col as usize).collect();
+                    if formula_line != Some(&shown) {
+                        return Err(format!(
+                            "line {line}: recorded column {col} on an atomic inline's tail, \
+                             showing {shown:?}, not the formula's line {formula_line:?}"
+                        ));
+                    }
+                }
                 Some(col) => {
                     let expected = content.start_on(line);
                     if expected != Some(col as usize) {

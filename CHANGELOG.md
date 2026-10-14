@@ -23,6 +23,7 @@ Each released version's section is also what ships as the GitHub release notes: 
 - In vim mode, motions and edits no longer stop inside or split an emoji or an accented letter, a decomposed accent no longer ends a word for motions, `diw`, `*` or a double-click, and `f`/`t` no longer match the plain letter under a decomposed accent.
 - Fixed various layout bugs, mostly in lists, blockquotes, footnotes, tables and wrapped text: misplaced clicks, cursor, highlights and line numbers; missing or extra blank rows; and misaligned indentation.
 - HTML comments inside a list item, quote or footnote are now hidden, as they already were elsewhere.
+- A `$$` math block at the start of a list item, or anywhere in a file with Windows (CRLF) line endings, now shows one line per row, as it does in a blockquote, instead of running its lines together.
 - A `---` further down a file that starts with frontmatter is no longer mistaken for more frontmatter.
 - Pasting an image on the blank line after an indented code block or HTML block now works.
 - Dragging to select no longer switches lines between rendered and Markdown source mid-drag.

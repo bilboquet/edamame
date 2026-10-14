@@ -1059,6 +1059,48 @@ fn display_math_paragraph_renders_as_a_math_code_block_without_promotion() {
     );
 }
 
+/// A `$$` block opening a list item renders the way it does in a quote, or later in the item:
+/// the marker on a row of its own, then the ` math ` code block, one row per formula line
+/// (#72).  It used to take the item's first-paragraph path, which joined the formula's lines
+/// on one row behind the marker, `$$` delimiters and all.
+#[test]
+fn display_math_opening_a_list_item_renders_as_a_math_code_block() {
+    let lines = render_at("- $$\n  x^2\n  y^2\n  $$\n", 40);
+    let text: Vec<String> = lines.iter().map(line_text).collect();
+    let trimmed: Vec<&str> = text.iter().map(|l| l.trim_end()).collect();
+    assert_eq!(
+        trimmed[0], "•",
+        "the marker sits on a row of its own: {text:?}"
+    );
+    assert_eq!(
+        trimmed[1].trim(),
+        "math",
+        "then the ` math ` label: {text:?}"
+    );
+    assert_eq!(trimmed[2].trim(), "x^2", "{text:?}");
+    assert_eq!(trimmed[3].trim(), "y^2", "{text:?}");
+    assert!(
+        !text.iter().any(|l| l.contains("$$")),
+        "the `$$` delimiters reveal only on cursor: {text:?}"
+    );
+}
+
+/// A CRLF file's `$$` block renders as the same ` math ` block an LF file's does: pulldown-cmark
+/// keeps the `\r\n` in the formula, which used to fail the delimiters-on-own-lines check and
+/// left the formula joined on one paragraph row.
+#[test]
+fn display_math_in_a_crlf_file_renders_as_a_math_code_block() {
+    for md in ["$$\r\nx^2\r\ny^2\r\n$$\r\n", "- $$\r\n  x^2\r\n  $$\r\n"] {
+        let lf: Vec<String> = render(&md.replace("\r\n", "\n"))
+            .iter()
+            .map(line_text)
+            .collect();
+        let crlf: Vec<String> = render(md).iter().map(line_text).collect();
+        assert_eq!(crlf, lf, "{md:?}");
+        assert!(crlf.iter().any(|l| l.trim() == "math"), "{crlf:?}");
+    }
+}
+
 // ── Table column widths are display columns ──────────────────────────────────
 
 /// Terminal cells a rendered line occupies as `line_render` paints it — two per CJK glyph.

@@ -114,7 +114,9 @@ impl<'t> Renderer<'t> {
             render_children(out, &item.blocks, None, &item.hidden, |i, block, out| {
                 if i == 0 {
                     match block {
-                        Block::Paragraph { inlines, src } => {
+                        // A `$$` paragraph renders flush, as a ` math ` code block, so it takes
+                        // the arm below like a fence does (#72).
+                        Block::Paragraph { inlines, src } if !renders_flush(block) => {
                             let mut spans = vec![Span::styled(marker.clone(), marker_style)];
                             if let Some(tp) = task_prefix.clone() {
                                 spans.push(tp);

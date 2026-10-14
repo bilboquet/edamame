@@ -316,14 +316,7 @@ impl<'t> Renderer<'t> {
                 if let Some(body) =
                     crate::markdown::parser::post_pass::display_math_block_body(block)
                 {
-                    self.render_code_block(
-                        Some("math"),
-                        &body,
-                        true,
-                        src,
-                        CodeCols::FirstLine,
-                        out,
-                    );
+                    self.render_code_block(Some("math"), &body, true, src, CodeCols::Formula, out);
                 } else {
                     self.render_paragraph(inlines, src, out, indent_prefix);
                 }
@@ -862,7 +855,7 @@ impl<'t> Renderer<'t> {
             }
             let col = match cols {
                 CodeCols::PerLine => src.col(k),
-                CodeCols::FirstLine => first_col,
+                CodeCols::Formula => src.col(k).or(first_col),
             };
             let line = line_at(src, k);
             match col {
@@ -1534,10 +1527,11 @@ fn with_children(like: &Inline, inner: Vec<Inline>) -> Inline {
 enum CodeCols {
     /// Each body line's own recorded column: a real code block.
     PerLine,
-    /// The opening line's column for every body line: a figures-off `$$…$$` paragraph, whose
-    /// formula pulldown-cmark reports as one span, so its later lines carry no column of their
-    /// own.  Right whenever the body shares the opening line's container prefix.
-    FirstLine,
+    /// A figures-off `$$…$$` paragraph's: each body line's column
+    /// ([`post_pass::with_formula_cols`]), else the opening line's.
+    ///
+    /// [`post_pass::with_formula_cols`]: crate::markdown::parser::post_pass::with_formula_cols
+    Formula,
 }
 
 /// The block-relative line of `src`'s `k`th line.
@@ -1728,6 +1722,29 @@ mod tests {
     fn render(md: &str) -> Vec<Line<'static>> {
         let blocks = parse(md);
         renderer().render(&blocks)
+    }
+
+    // ── Display math ─────────────────────────────────────────────────
+
+    /// A ` math ` block's body row maps by its line's own column, and by the `$$` line's where
+    /// [`post_pass::with_formula_cols`] recorded none.
+    ///
+    /// [`post_pass::with_formula_cols`]: crate::markdown::parser::post_pass::with_formula_cols
+    #[test]
+    fn a_math_block_row_without_a_column_takes_the_opening_lines() {
+        let block = Block::Paragraph {
+            inlines: vec![Inline::Math {
+                source: "\nx\ny\n".into(),
+                display: true,
+            }],
+            src: SrcLines::new(0, &[Some(2), Some(1), None, None]),
+        };
+        let (rows, _) = renderer().render_with_counts(&[block]);
+        let raw_col = |row: usize| match &rows.origins[row].cols {
+            crate::markdown::row_origin::ColOrigin::Content { raw_col, .. } => *raw_col,
+            other => panic!("row {row} isn't content: {other:?}"),
+        };
+        assert_eq!((raw_col(1), raw_col(2)), (1, 2), "{:?}", rows.origins);
     }
 
     // ── Render cache ──────────────────────────────────────────────────
