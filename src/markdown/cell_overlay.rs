@@ -1,10 +1,132 @@
+//! The raw-reveal overlays of the cursor's table cell: which raw text the revealed cell shows,
+//! and where.  The painter (`ui::rendered_view`) draws them, and the click mapper
+//! (`editor::mouse_ops::coord`) maps a click on the revealed cell through the same overlay, so
+//! the two agree on which raw char each screen cell shows.
+
+use std::ops::Range;
+
 use ratatui::text::Line;
 
-use crate::editor::EditorState;
-use crate::markdown::table_layout::{
+use super::table_layout::{
     cells_of, drawn_cell_at, hard_wrap_ranges, last_cluster_start, rendered_pipe_cells, str_cells,
-    unpadded_cell_shift, wrap_cell_with_indices, CellOverlay,
+    unpadded_cell_shift, wrap_cell_with_indices,
 };
+
+/// The overlay of a revealed cell on a one-line row: [`compute_cell_overlay`] when the raw
+/// text fits the rendered cell, else [`compute_cell_chunk_overlay`], which scrolls it
+/// horizontally.  `None` when neither applies (a separator, a cell GFM drops), and the row
+/// reveals whole.
+pub fn single_line_cell_overlay(
+    raw_row: &str,
+    content_col: usize,
+    rendered_line: &Line<'_>,
+    cursor_col_raw: usize,
+) -> Option<CellOverlay> {
+    compute_cell_overlay(raw_row, content_col, rendered_line, cursor_col_raw)
+        .or_else(|| compute_cell_chunk_overlay(raw_row, content_col, rendered_line, cursor_col_raw))
+}
+
+/// Metadata for overlaying a raw cell on a rendered table row.  `rendered_start..
+/// rendered_end` spans the content area between the two `│` characters, exclusive, in
+/// terminal cells; `raw_text` is padded/clamped to that width when painted so borders and
+/// neighboring cells stay intact.
+pub struct CellOverlay {
+    pub rendered_start: usize,
+    pub rendered_end: usize,
+    pub raw_text: String,
+    /// Cursor offset within `raw_text` in chars — past its end, each further index is one
+    /// blank cell; `None` when it sits outside the overlay area, which means the caller takes
+    /// the fallback path.
+    pub cursor_in_cell: Option<usize>,
+    /// Byte offset in the raw row where this cell's content starts, so the caller can
+    /// align an absolute selection byte range onto `raw_text`.
+    pub raw_cell_byte_start: usize,
+    /// Screen cell of the cell's left `│`: a click from there up to `rendered_end` is in
+    /// this cell.
+    pub left_pipe: usize,
+    /// Chars of the raw row holding the whole cell's content, its pad whitespace trimmed
+    /// ([`content_range`]): the span a click on the revealed cell clamps into.
+    pub raw_content: Range<usize>,
+}
+
+/// The chars of `cell`, a char range of the raw row whose chars are `cell_chars`, with its
+/// leading and trailing whitespace trimmed; empty at the cell's end when it is all whitespace.
+fn content_range(cell_chars: &[char], cell: Range<usize>) -> Range<usize> {
+    let leading = cell_chars.iter().take_while(|c| c.is_whitespace()).count();
+    let trailing = cell_chars[leading..]
+        .iter()
+        .rev()
+        .take_while(|c| c.is_whitespace())
+        .count();
+    cell.start + leading..cell.end - trailing
+}
+
+/// A cell-scoped overlay for the cursor's active cell.
+///
+/// The cell is [`drawn_cell_at`]'s, from `content_col`.  `None` when the row isn't a row of
+/// cells (the alignment row renders as `├─┼─┤`) or the cursor is in a cell GFM drops, both of
+/// which reveal the whole line, or when the raw cell text is wider (in cells) than the rendered
+/// area — the caller then falls back to the horizontally scrolling chunk overlay.
+fn compute_cell_overlay(
+    raw_row: &str,
+    content_col: usize,
+    rendered_line: &Line<'_>,
+    cursor_col: usize,
+) -> Option<CellOverlay> {
+    let rendered_pipes = rendered_pipe_cells(rendered_line);
+    let drawn = rendered_pipes.len().saturating_sub(1);
+    let (cell_idx, raw_cell) = drawn_cell_at(raw_row, content_col, drawn, cursor_col)?;
+
+    let raw_cell_start = raw_cell.start;
+    let raw_cell_end = raw_cell.end;
+    let raw_text: String = raw_row
+        .chars()
+        .skip(raw_cell_start)
+        .take(raw_cell_end - raw_cell_start)
+        .collect();
+
+    let raw_cell_byte_start = raw_row
+        .char_indices()
+        .nth(raw_cell_start)
+        .map(|(b, _)| b)
+        .unwrap_or(raw_row.len());
+
+    let rendered_start = rendered_pipes[cell_idx] + 1 + unpadded_cell_shift(&raw_text);
+    let rendered_end = rendered_pipes[cell_idx + 1];
+    let rendered_width = rendered_end.saturating_sub(rendered_start);
+
+    if str_cells(&raw_text) > rendered_width {
+        return None;
+    }
+
+    // The cell the cursor lands on; past the text each char index is one blank cell.
+    let cursor_offset = cursor_col.saturating_sub(raw_cell_start);
+    let raw_chars: Vec<char> = raw_text.chars().collect();
+    let cursor_cell = cells_of(&raw_chars[..cursor_offset.min(raw_chars.len())])
+        + cursor_offset.saturating_sub(raw_chars.len());
+    let cursor_in_cell = if cursor_cell < rendered_width {
+        Some(cursor_offset)
+    } else if cursor_cell == rendered_width {
+        // On the closing pipe of a full cell: show it on the last glyph.
+        Some(if cursor_offset <= raw_chars.len() {
+            last_cluster_start(&raw_chars[..cursor_offset])
+        } else {
+            cursor_offset - 1
+        })
+    } else {
+        None
+    };
+
+    Some(CellOverlay {
+        rendered_start,
+        rendered_end,
+        raw_text,
+        cursor_in_cell,
+        raw_cell_byte_start,
+        left_pipe: rendered_pipes[cell_idx],
+        raw_content: content_range(&raw_chars, raw_cell),
+    })
+}
 
 /// Overlay for a cell whose raw markdown is wider than its rendered cell: hard-wraps the
 /// source into chunks of at most `cell_width` cells and returns the chunk under the cursor, so
@@ -13,7 +135,7 @@ use crate::markdown::table_layout::{
 /// Hard-wrap ([`hard_wrap_ranges`]) rather than word-wrap so chunk boundaries depend only on
 /// glyph widths and the cursor never jumps chunks mid-word.  The cell is [`drawn_cell_at`]'s,
 /// from `content_col`.
-pub(super) fn compute_cell_chunk_overlay(
+fn compute_cell_chunk_overlay(
     raw_row: &str,
     content_col: usize,
     rendered_line: &Line<'_>,
@@ -71,43 +193,45 @@ pub(super) fn compute_cell_chunk_overlay(
         raw_text: chunk,
         cursor_in_cell: Some(col_in_chunk),
         raw_cell_byte_start: chunk_byte_start,
+        left_pipe: rendered_pipes[cell_idx],
+        raw_content: content_range(&raw_chars, raw_cell),
     })
 }
 
 /// Cursor position inside a *wrapped* table cell (one that broke onto several rendered
 /// sub-lines). `RenderedView::render` uses it to move `cursor_rendered_line` onto the right
 /// sub once the cell reveals.
-pub(super) struct WrappedCellOverlay {
-    /// Sub-line index in `editor.parsed.lines` of the row's first rendered sub.
-    pub(super) row_first_line_idx: usize,
+pub struct WrappedCellOverlay {
+    /// Sub-line index in `lines` of the row's first rendered sub.
+    pub row_first_line_idx: usize,
     /// One entry per rendered sub-line of the row, painted on
-    /// `editor.parsed.lines[row_first_line_idx + i]`. Trailing entries are blank when the raw
+    /// `lines[row_first_line_idx + i]`. Trailing entries are blank when the raw
     /// text wraps to fewer chunks than the row's height, so the painter wipes the stale tail.
-    pub(super) subs: Vec<CellOverlay>,
+    pub subs: Vec<CellOverlay>,
     /// Index within `subs` that contains the cursor.
-    pub(super) cursor_sub: usize,
+    pub cursor_sub: usize,
 }
 
 /// One `CellOverlay` per rendered sub-line of the cursor's row, mapping word-wrap chunks of the
 /// raw cell text onto the sub-lines. Returns `None` for single-sub rows, which
 /// `compute_cell_overlay` / `compute_cell_chunk_overlay` handle.
 ///
-/// `row_lines` are the rows of `editor.parsed.lines` showing the table row's cells (its
-/// origins' [`row_map::table_row`](crate::document::row_map::table_row)), `raw_row` its
-/// source line, and `content_col` the row's content column there (the hit's `raw_col`).
+/// `row_lines` are the rows of `lines` (the document's rendered lines) showing the table row's
+/// cells (its origins' [`row_map::table_row`](crate::document::row_map::table_row)), `raw_row`
+/// its source line, and `content_col` the row's content column there (the hit's `raw_col`).
 ///
 /// Raw text is wider than rendered (markers the renderer drops), so it routinely wraps to more
 /// chunks than the row has sub-lines; the overlay then scrolls a `row_height`-chunk window
 /// containing the cursor's chunk onto the row.
-pub(super) fn compute_wrapped_cell_overlay(
-    editor: &EditorState,
-    row_lines: std::ops::Range<usize>,
+pub fn compute_wrapped_cell_overlay(
+    lines: &[Line<'_>],
+    row_lines: Range<usize>,
     raw_row: &str,
     content_col: usize,
     cursor_col_raw: usize,
 ) -> Option<WrappedCellOverlay> {
     let row_height = row_lines.len();
-    let block_lines = editor.parsed.lines.get(row_lines.clone())?;
+    let block_lines = lines.get(row_lines.clone())?;
 
     // Every wrap sub-line of a row has identical pipe cells (see `render_table_row`); the
     // char positions differ per sub-line once a wide glyph sits left of the cell.
@@ -133,18 +257,12 @@ pub(super) fn compute_wrapped_cell_overlay(
         return None;
     }
 
-    // Wrap the *trimmed* content: the pad whitespace belongs to the rendered pad columns, and
-    // the click mapper (`coord::table_click_to_raw_col`) wraps trimmed text too — identical
-    // input keeps the overlay's chunks in lockstep with the chunk a click resolves into.
+    // Wrap the *trimmed* content: the pad whitespace belongs to the rendered pad columns, so
+    // the chunks start on the content the cell shows.
     let raw_chars: Vec<char> = raw_cell_text.chars().collect();
-    let raw_leading = raw_chars.iter().take_while(|c| c.is_whitespace()).count();
-    let raw_trailing = raw_chars
-        .iter()
-        .rev()
-        .take_while(|c| c.is_whitespace())
-        .count();
-    let content_chars = raw_chars.len().saturating_sub(raw_leading + raw_trailing);
-    let trimmed: String = raw_chars[raw_leading..raw_leading + content_chars]
+    let raw_content = content_range(&raw_chars, raw_cell);
+    let raw_leading = raw_content.start - raw_cell_start_char;
+    let trimmed: String = raw_chars[raw_leading..raw_content.end - raw_cell_start_char]
         .iter()
         .collect();
 
@@ -178,9 +296,8 @@ pub(super) fn compute_wrapped_cell_overlay(
         }
     }
 
-    // Bottom-anchored minimal scroll: the click mapper resolves a click on sub-line `s` to
-    // chunk `s`, so any chunk below `row_height` must stay on its own sub-line or the text
-    // jumps upward when the reveal fires.
+    // Bottom-anchored minimal scroll: a chunk below `row_height` stays on its own sub-line, or
+    // the text jumps upward when the reveal fires.
     let window_start = cursor_sub.saturating_sub(row_height - 1);
     let window = &wrapped[window_start..(window_start + row_height).min(wrapped.len())];
     let cursor_sub = cursor_sub - window_start;
@@ -213,6 +330,8 @@ pub(super) fn compute_wrapped_cell_overlay(
             raw_text: chunk_text.clone(),
             cursor_in_cell,
             raw_cell_byte_start,
+            left_pipe: rendered_pipes[cell_idx],
+            raw_content: raw_content.clone(),
         });
     }
 
@@ -230,6 +349,8 @@ pub(super) fn compute_wrapped_cell_overlay(
             raw_text: String::new(),
             cursor_in_cell: None,
             raw_cell_byte_start: cell_end_byte,
+            left_pipe: rendered_pipes[cell_idx],
+            raw_content: raw_content.clone(),
         });
     }
 
@@ -242,9 +363,17 @@ pub(super) fn compute_wrapped_cell_overlay(
 
 #[cfg(test)]
 mod tests {
+    use ratatui::text::Span;
+
     use super::*;
     use crate::config::Theme;
     use crate::document::{row_map, Buffer};
+    use crate::markdown::inline_col_map::RefLabels;
+    use crate::markdown::table_layout::table_raw_col_to_rendered;
+
+    fn line_with(s: &str) -> Line<'static> {
+        Line::from(vec![Span::raw(s.to_owned())])
+    }
 
     /// The rows showing the first data row's cells of the table opening the document.
     fn data_row(state: &crate::editor::EditorState) -> std::ops::Range<usize> {
@@ -339,9 +468,14 @@ mod tests {
         let raw_row = "| x | `aa` `bb` `cc` `dd` `ee` |";
         let cursor_col = raw_row.find("cc").unwrap(); // ASCII: byte == char col
 
-        let overlay =
-            compute_wrapped_cell_overlay(&state, data_row(&state), raw_row, 0, cursor_col)
-                .expect("multi-sub row must use the wrapped-cell overlay, not the chunk fallback");
+        let overlay = compute_wrapped_cell_overlay(
+            &state.parsed.lines,
+            data_row(&state),
+            raw_row,
+            0,
+            cursor_col,
+        )
+        .expect("multi-sub row must use the wrapped-cell overlay, not the chunk fallback");
 
         assert!(overlay.subs.len() >= 2, "fixture row must wrap");
         assert!(
@@ -370,9 +504,14 @@ mod tests {
         // 'a' of "appender" renders on the row's second wrap sub-line.
         let cursor_col = raw_row.find("appender").unwrap(); // ASCII: byte == char col
 
-        let overlay =
-            compute_wrapped_cell_overlay(&state, data_row(&state), raw_row, 0, cursor_col)
-                .expect("wrapped code-span cell must use the multi-sub overlay");
+        let overlay = compute_wrapped_cell_overlay(
+            &state.parsed.lines,
+            data_row(&state),
+            raw_row,
+            0,
+            cursor_col,
+        )
+        .expect("wrapped code-span cell must use the multi-sub overlay");
 
         assert_eq!(overlay.subs.len(), 2, "fixture row wraps to two sub-lines");
         assert!(
@@ -389,5 +528,118 @@ mod tests {
             "no sub-line may be wasted on a pad-space chunk: {:?}",
             overlay.subs.iter().map(|s| &s.raw_text).collect::<Vec<_>>()
         );
+    }
+
+    /// A wide glyph in the cell to the left shifts every later pipe by a cell per glyph; the
+    /// overlay addresses screen cells, so it must land past them.
+    #[test]
+    fn compute_cell_overlay_places_the_cell_in_screen_cells() {
+        // Cells: │0 ␠1 日2-3 本4-5 ␠6 │7 ␠8 a9 b10 ␠11 │12
+        let line = line_with("│ 日本 │ ab │");
+        let raw = "| 日本 | ab |";
+        let cursor = raw.chars().position(|c| c == 'a').unwrap();
+        let ov = compute_cell_overlay(raw, 0, &line, cursor).expect("fits");
+        assert_eq!((ov.rendered_start, ov.rendered_end), (8, 12));
+        assert_eq!(ov.raw_text, " ab ");
+        assert_eq!(ov.cursor_in_cell, Some(1));
+    }
+
+    #[test]
+    fn compute_cell_overlay_measures_the_raw_text_in_cells() {
+        // Content area of 6 cells: ` 日本 ` (6) fits, ` 日本語 ` (8) does not.
+        let line = line_with("│ abcd │");
+        assert!(compute_cell_overlay("| 日本 |", 0, &line, 2).is_some());
+        assert!(compute_cell_overlay("| 日本語 |", 0, &line, 2).is_none());
+    }
+
+    /// On the closing pipe of a cell the raw text fills exactly, the cursor shows on the last
+    /// glyph instead of past the border.
+    #[test]
+    fn compute_cell_overlay_clamps_a_cursor_past_a_full_cell() {
+        let line = line_with("│ abcd │");
+        let raw = "| 日本 |";
+        let closing = raw.chars().count() - 1;
+        let ov = compute_cell_overlay(raw, 0, &line, closing).expect("fits");
+        assert_eq!(ov.cursor_in_cell, Some(3), "on the trailing pad char");
+    }
+
+    /// When the last char is a zero-width mark, the clamp lands on its cluster's base char:
+    /// a zero-width char has no cell of its own, so a cursor on the mark would not be drawn.
+    #[test]
+    fn compute_cell_overlay_clamps_a_cursor_onto_the_last_cluster() {
+        // ` ` ` ` a b c e U+0301: seven chars, six cells — exactly the content area.
+        let line = line_with("│ abcd │");
+        let raw = "|  abce\u{301}|";
+        let closing = raw.chars().count() - 1;
+        let ov = compute_cell_overlay(raw, 0, &line, closing).expect("fits");
+        assert_eq!(ov.cursor_in_cell, Some(5), "on the `e`, not the accent");
+    }
+
+    #[test]
+    fn compute_cell_overlay_none_when_raw_exceeds_rendered_width() {
+        let raw = "| supercalifragilistic | b |";
+        let rendered = line_with("│ a │ b │");
+        assert!(compute_cell_overlay(raw, 0, &rendered, 3).is_none());
+    }
+
+    #[test]
+    fn compute_cell_overlay_returns_metadata_when_fits() {
+        let raw = "| a | b |";
+        let rendered = line_with("│ a │ b │");
+        let overlay = compute_cell_overlay(raw, 0, &rendered, 2).expect("overlay fits");
+        assert_eq!(overlay.raw_text, " a ");
+        assert_eq!(overlay.rendered_start, 1);
+        assert_eq!(overlay.rendered_end, 4);
+    }
+
+    /// A row without edge pipes reveals cell by cell, its unpadded first cell one cell in so
+    /// its text covers the rendered text, not the pad.
+    #[test]
+    fn compute_cell_overlay_pairs_cells_without_edge_pipes() {
+        let rendered = line_with("│ a │ b │");
+        let a = compute_cell_overlay("a | b", 0, &rendered, 0).expect("fits");
+        assert_eq!(a.raw_text, "a ");
+        assert_eq!((a.rendered_start, a.rendered_end), (2, 4));
+        assert_eq!(a.cursor_in_cell, Some(0));
+        let b = compute_cell_overlay("a | b", 0, &rendered, 4).expect("fits");
+        assert_eq!(b.raw_text, " b");
+        assert_eq!((b.rendered_start, b.rendered_end), (5, 8));
+        assert_eq!(b.cursor_in_cell, Some(1));
+    }
+
+    /// A cursor past a short row's closing pipe reveals the first missing cell, empty, with the
+    /// cursor on its first content cell, where the indicator before the reveal shows it too.
+    #[test]
+    fn a_cursor_past_a_short_rows_closing_pipe_shows_in_the_missing_cell() {
+        let raw = "| 1 |";
+        let rendered = line_with("│ 1 │   │   │");
+        let ov = compute_cell_overlay(raw, 0, &rendered, 5).expect("fits");
+        assert_eq!(ov.raw_text, "");
+        assert_eq!((ov.rendered_start, ov.rendered_end), (6, 8));
+        assert_eq!(ov.cursor_in_cell, Some(0));
+        assert_eq!(ov.raw_cell_byte_start, 5);
+        let labels = RefLabels::default();
+        assert_eq!(
+            table_raw_col_to_rendered(raw, 0, &[rendered], 5, &labels),
+            Some((0, 6))
+        );
+    }
+
+    /// A cursor in a cell GFM drops has no drawn cell: no cell overlay and no indicator, so the
+    /// row reveals whole and the cursor shows on its raw text.
+    #[test]
+    fn a_cursor_in_a_dropped_cell_has_no_cell_overlay() {
+        let raw = "| 1 | 2 | 3 | 4 | 5 |";
+        let rendered = line_with("│ 1 │ 2 │ 3 │");
+        let five = raw.find('5').unwrap();
+        assert!(compute_cell_overlay(raw, 0, &rendered, five).is_none());
+        let labels = RefLabels::default();
+        assert!(
+            table_raw_col_to_rendered(raw, 0, std::slice::from_ref(&rendered), five, &labels)
+                .is_none()
+        );
+        // The last drawn cell, up to its closing pipe, still pairs.
+        let three = raw.find('3').unwrap();
+        assert!(compute_cell_overlay(raw, 0, &rendered, three).is_some());
     }
 }

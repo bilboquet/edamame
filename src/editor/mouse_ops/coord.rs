@@ -4,6 +4,7 @@ use crate::document::wrap;
 use crate::document::{row_map, CellBand};
 use crate::editor::table_edit_ops;
 use crate::editor::{EditorState, Mode};
+use crate::markdown::cell_overlay::{self, CellOverlay};
 use crate::markdown::table_layout;
 
 /// The rendered line under document-area `row` (scroll- and wrap-aware): its index into
@@ -373,9 +374,10 @@ pub fn rendered_sub_line_to_offset(
 /// A click on a table's row: the table row and wrap chunk come from the row's origin
 /// ([`row_map::table_row`], which snaps a border or separator onto a table row), the column from
 /// the pipe positions.  A border or separator shares its table row's column geometry, so a click
-/// on one lands in the cell below or above it, where the cursor then shows.  A row whose pipes
-/// don't match its source line's (a pipe-less row, a mid-edit line) maps its char 1:1, clamped
-/// to the raw line.
+/// on one lands in the cell below or above it, where the cursor then shows.  A click on the
+/// cursor's revealed cell maps through the raw text the view paints there
+/// ([`overlay_click_to_raw_col`]).  A row whose pipes don't match its source line's (a pipe-less
+/// row, a mid-edit line) maps its char 1:1, clamped to the raw line.
 fn table_click_to_offset(
     state: &EditorState,
     block: &BlockLocation,
@@ -420,19 +422,108 @@ fn table_click_to_offset(
     };
     // Rendered cells are padded to layout width; map through the pipe positions so the click
     // stays inside the clicked cell.
-    let raw_col = cells_line
-        .and_then(|line| {
-            table_click_to_raw_col(
-                line_text,
-                hit.raw_col,
-                line,
-                clamped_col,
-                table_sub,
-                state.parsed.ref_labels(),
-            )
+    let raw_col = revealed_cursor_col(state, block, hit)
+        .and_then(|cursor_col| {
+            overlay_click_to_raw_col(line_text, cursor_col, clamped_col, |c| {
+                revealed_cell_overlay(state, block, hit, line_text, rendered_line_idx, c)
+            })
+        })
+        .or_else(|| {
+            cells_line.and_then(|line| {
+                table_click_to_raw_col(
+                    line_text,
+                    hit.raw_col,
+                    line,
+                    clamped_col,
+                    table_sub,
+                    state.parsed.ref_labels(),
+                )
+            })
         })
         .unwrap_or(clamped_col);
     raw_col_to_buffer_char(state, block, line_byte_start, line_text, raw_col)
+}
+
+/// The cursor's char column on the source line of `hit`, a row of cells, when the view shows
+/// that row revealed: [`reveal_shown`], and the cursor on that line of this block.
+fn revealed_cursor_col(
+    state: &EditorState,
+    block: &BlockLocation,
+    hit: &row_map::TableRowHit,
+) -> Option<usize> {
+    if !reveal_shown(state) || !hit.cells {
+        return None;
+    }
+    let (cursor_block, pos) = crate::ui::rendered_view::cursor_block_pos(state)?;
+    (cursor_block == block.idx && pos.line == hit.line).then_some(pos.col)
+}
+
+/// The overlay the view paints on `rendered_line_idx`, a line of the revealed table row `hit`
+/// whose source line is `line_text`, with the cursor at char column `cursor_col` there.  Asked
+/// as `RenderedView` asks it: a row that wraps inside its cells takes the wrapped overlay on
+/// each of its lines, a one-line row the single-line overlay on the revealed cursor row.
+/// `None` where the view reveals the line whole, or paints nothing over it.  Only reached past
+/// [`revealed_cursor_col`], which checked [`reveal_shown`].
+fn revealed_cell_overlay(
+    state: &EditorState,
+    block: &BlockLocation,
+    hit: &row_map::TableRowHit,
+    line_text: &str,
+    rendered_line_idx: usize,
+    cursor_col: usize,
+) -> Option<CellOverlay> {
+    let span_start = block.rendered_span.start;
+    if let Some(wrapped) = cell_overlay::compute_wrapped_cell_overlay(
+        &state.parsed.lines,
+        span_start + hit.rows.start..span_start + hit.rows.end,
+        line_text,
+        hit.raw_col,
+        cursor_col,
+    ) {
+        let sub = rendered_line_idx.checked_sub(wrapped.row_first_line_idx)?;
+        return wrapped.subs.into_iter().nth(sub);
+    }
+    if !is_cursor_reveal_row(state, block.idx, rendered_line_idx) {
+        return None;
+    }
+    let rendered_line = state.parsed.lines.get(rendered_line_idx)?;
+    cell_overlay::single_line_cell_overlay(line_text, hit.raw_col, rendered_line, cursor_col)
+}
+
+/// Cell column `col` on a revealed table row → char column on `raw_line`, through the overlay
+/// `overlay_at(cursor_col)` paints in the cursor's cell: the click lands on the raw char drawn
+/// under it, hidden markers and all.  Clamped to the cell's content, so a click on its padding
+/// lands on the first char or past the last, as on a formatted cell.  A click past a chunk's
+/// text lands just past it only where the overlay then shows the cursor on that chunk (a wrap
+/// dropped the space there); where the next chunk would take the cursor, it lands on the last
+/// glyph instead.  `None` off the overlay's cell, and on a blank sub-line padding a short
+/// wrapped cell: the caller's map through [`table_layout::CellContent`] covers both.
+fn overlay_click_to_raw_col(
+    raw_line: &str,
+    cursor_col: usize,
+    col: usize,
+    overlay_at: impl Fn(usize) -> Option<CellOverlay>,
+) -> Option<usize> {
+    let overlay = overlay_at(cursor_col)?;
+    if overlay.raw_text.is_empty() || !(overlay.left_pipe..overlay.rendered_end).contains(&col) {
+        return None;
+    }
+    let start = raw_line[..overlay.raw_cell_byte_start.min(raw_line.len())]
+        .chars()
+        .count();
+    let chars: Vec<char> = overlay.raw_text.chars().collect();
+    let in_cell = col.saturating_sub(overlay.rendered_start);
+    let mut at = wrap::char_idx_at_cell_col(chars.iter().copied(), in_cell, 0).min(chars.len());
+    if at == chars.len() {
+        let shows_here = overlay_at(start + at).is_some_and(|o| {
+            o.raw_cell_byte_start == overlay.raw_cell_byte_start && o.cursor_in_cell.is_some()
+        });
+        if !shows_here {
+            at = table_layout::last_cluster_start(&chars);
+        }
+    }
+    let content = overlay.raw_content;
+    Some((start + at).clamp(content.start, content.end))
 }
 
 /// The char of `line_text` under cell `col` on wrap row `sub` of the line, laid out as the
@@ -603,14 +694,22 @@ fn revealed_raw_row_count(
 /// 1:1 from its origin, and a row that never de-renders (a code body) stays rendered, so
 /// neither counts; nor does any row in Preview, which never reveals.
 fn is_revealed_cursor_row(state: &EditorState, block_idx: usize, rendered_line_idx: usize) -> bool {
+    reveal_shown(state) && is_cursor_reveal_row(state, block_idx, rendered_line_idx)
+}
+
+/// Whether the view shows the cursor block revealed: Rendered mode, the reveal on.
+fn reveal_shown(state: &EditorState) -> bool {
+    state.mode == Mode::Rendered && state.cursor_block_revealed()
+}
+
+/// [`is_revealed_cursor_row`] without the [`reveal_shown`] gate, for a caller that checked it.
+fn is_cursor_reveal_row(state: &EditorState, block_idx: usize, rendered_line_idx: usize) -> bool {
     let block_start = state
         .parsed
         .source_map
         .rendered_lines_for_block(block_idx)
         .start;
-    state.mode == Mode::Rendered
-        && state.cursor_block_revealed()
-        && !state.parsed.is_diagram_reveal_block(block_idx)
+    !state.parsed.is_diagram_reveal_block(block_idx)
         && rendered_line_idx == crate::editor::state::cursor_rendered_line_idx(state)
         && row_map::reveals(
             &state.parsed,
@@ -1081,5 +1180,37 @@ mod tests {
             Some('t'),
             "click on the second segment must land on 'three', got offset {off}",
         );
+    }
+
+    /// A click past a chunk's text in a revealed cell lands just past it where the cursor
+    /// would still show on that chunk (the last one), and on its last glyph where the next
+    /// chunk would take the cursor (a wide glyph wrapped early).  A click on the closing
+    /// pipe is off the overlay's cell.
+    #[test]
+    fn overlay_click_past_a_chunk_lands_where_the_cursor_shows() {
+        // Content area of six cells, from cell 1 to the closing pipe at 7.
+        let line = Line::from("│ abcd │");
+        let click = |raw: &str, cursor: usize, col: usize| {
+            overlay_click_to_raw_col(raw, cursor, col, |c| {
+                cell_overlay::single_line_cell_overlay(raw, 0, &line, c)
+            })
+        };
+
+        // Cell ` abcdefghi` chunks as ` abcde` | `fghi`; the cursor is on `g`.
+        let raw = "| abcdefghi|";
+        let g = raw.find('g').unwrap();
+        let past_i = raw.find('i').unwrap() + 1;
+        assert_eq!(click(raw, g, 5), Some(past_i));
+        assert_eq!(click(raw, g, 6), Some(past_i));
+        assert_eq!(click(raw, g, 7), None);
+
+        // Cell ` abcd日fg` chunks as ` abcd` | `日fg`: `日` doesn't fit beside ` abcd`.  The
+        // cursor is on `b`; the cursor past `d` would show in the second chunk, so a click past
+        // `d` lands on it, as a click on it does.
+        let raw = "| abcd日fg|";
+        let b = raw.find('b').unwrap();
+        let d = raw.find('d').unwrap();
+        assert_eq!(click(raw, b, 5), Some(d));
+        assert_eq!(click(raw, b, 6), Some(d));
     }
 }

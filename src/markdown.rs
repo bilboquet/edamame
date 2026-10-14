@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod cell_overlay;
 pub mod destination;
 pub mod highlight;
 pub mod inline_col_map;

@@ -1,4 +1,3 @@
-mod cell_overlay;
 mod paint;
 mod raw_text;
 
@@ -9,7 +8,8 @@ use crate::document::row_map::revealed_indent;
 use crate::document::wrap::Indent;
 use crate::editor::vim_ops::VisualKind;
 use crate::editor::EditorState;
-use crate::markdown::table_layout::{compute_cell_overlay, table_raw_col_to_rendered};
+use crate::markdown::cell_overlay::{compute_wrapped_cell_overlay, single_line_cell_overlay};
+use crate::markdown::table_layout::table_raw_col_to_rendered;
 
 use super::image_view::{self, ImageLayoutSnapshot};
 use super::line_render::{
@@ -18,7 +18,6 @@ use super::line_render::{
 use super::link_view::{self, LinkLayoutSnapshot};
 use super::table_view::{self, TableLayoutSnapshot};
 
-use self::cell_overlay::{compute_cell_chunk_overlay, compute_wrapped_cell_overlay};
 use self::paint::{
     make_code_styled_body_line, make_raw_line_over, make_raw_line_with_selection, overlay_raw_cell,
     paint_byte_range_overlay, Overlay, PaintedRow,
@@ -221,7 +220,7 @@ impl<'a> StatefulWidget for RenderedView<'a> {
             .filter(|t| t.cells && t.line == cursor_raw_line)
             .and_then(|t| {
                 compute_wrapped_cell_overlay(
-                    editor,
+                    &editor.parsed.lines,
                     cursor_block_lines.start + t.rows.start..cursor_block_lines.start + t.rows.end,
                     raw_lines.get(cursor_raw_line).copied().unwrap_or(""),
                     t.raw_col,
@@ -643,24 +642,16 @@ impl<'a> StatefulWidget for RenderedView<'a> {
             } else if reveal_raw && virtual_idx == cursor_rendered_line && cursor_row_reveals {
                 let raw_text = raw_lines.get(cursor_raw_line).copied().unwrap_or("");
                 // Table rows prefer a cell-scoped reveal, keeping borders and neighboring
-                // cells rendered: `compute_cell_overlay` when the raw text fits, else
-                // `compute_cell_chunk_overlay`, which scrolls the cell horizontally.
-                let line_opt = editor.parsed.lines.get(virtual_idx);
-                let cell_overlay = if is_table {
-                    line_opt.and_then(|line| {
-                        compute_cell_overlay(raw_text, table_content_col, line, cursor_col)
-                    })
-                } else {
-                    None
-                };
-                let chunk_overlay = if is_table && cell_overlay.is_none() {
-                    line_opt.and_then(|line| {
-                        compute_cell_chunk_overlay(raw_text, table_content_col, line, cursor_col)
-                    })
-                } else {
-                    None
-                };
-                if let Some(overlay) = cell_overlay.or(chunk_overlay) {
+                // cells rendered.
+                let cell_overlay = editor
+                    .parsed
+                    .lines
+                    .get(virtual_idx)
+                    .filter(|_| is_table)
+                    .and_then(|line| {
+                        single_line_cell_overlay(raw_text, table_content_col, line, cursor_col)
+                    });
+                if let Some(overlay) = cell_overlay {
                     let line = &editor.parsed.lines[virtual_idx];
                     rows_used = render_line_from_visual(
                         line,
