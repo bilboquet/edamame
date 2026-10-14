@@ -230,6 +230,9 @@ src/
   markdown.rs / markdown/
     ast.rs          # Block, Inline, ListItem, SrcLines (block-relative source positions);
                     #   inlines_to_plain()
+    cell_overlay.rs # the revealed cursor cell's raw text: CellOverlay and its fitting,
+                    #   chunk and wrapped builders; the painter draws them and the click
+                    #   maps through them
     highlight.rs    # syntect tokenizer: scope → TokenClass, char-indexed ranges,
                     #   size caps, incremental per-line ParseState reuse
     destination.rs  # link destinations: local_image_urls (the document's own images),
@@ -277,7 +280,7 @@ src/
     line_render.rs      # render_line / render_line_with_cursor: paints
                         #   `document::wrap`'s rows with the trailing-cell fill;
                         #   patch_char_cols (highlights); shared by Preview and Rendered
-    preview.rs, raw_view.rs, rendered_view.rs (+ rendered_view/{paint, cell_overlay,
+    preview.rs, raw_view.rs, rendered_view.rs (+ rendered_view/{paint,
                         #   raw_text}.rs)         # the three editor sub-views
     export_theme_modal.rs, insert_table_modal.rs, save_copy_modal.rs  # text inputs
     keybinds_overlay.rs (+ /categories.rs), settings_overlay.rs (+ /rows.rs)

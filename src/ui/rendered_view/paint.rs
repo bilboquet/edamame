@@ -7,7 +7,8 @@ use ratatui::{
 
 use crate::config::Theme;
 use crate::editor::EditorState;
-use crate::markdown::table_layout::{char_cells, CellOverlay};
+use crate::markdown::cell_overlay::CellOverlay;
+use crate::markdown::table_layout::char_cells;
 use crate::ui::line_render;
 
 use crate::document::row_map::{self, RawPos};
@@ -657,6 +658,8 @@ mod tests {
             raw_text: raw.to_owned(),
             cursor_in_cell: cursor,
             raw_cell_byte_start: 0,
+            left_pipe: start.saturating_sub(1),
+            raw_content: 0..raw.chars().count(),
         }
     }
 

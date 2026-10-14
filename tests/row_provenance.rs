@@ -1135,8 +1135,9 @@ fn a_wide_glyph_filling_a_revealed_row_keeps_clicks_where_the_cursor_shows() {
 /// narrowed to fit wraps its cells instead, and a header cell's raw text must fill every line
 /// the cell wraps to, as a data cell's does, not leave its later lines rendered.  Every click
 /// lands where the cursor then shows, with the cursor starting in each cell of each row, at each
-/// width from where the table fits down to where its rows wrap: at top level, quoted, in a list
-/// item, with wide glyphs, and with a header cell that wraps.
+/// width from where the table fits down to where its rows wrap, and wide: at top level, quoted,
+/// in a list item, with wide glyphs, with a header cell that wraps, and with hidden markup in a
+/// cell, whose revealed raw text a click maps through rather than the formatted text (#78).
 #[test]
 fn clicking_a_revealed_cell_of_a_wrapping_table_keeps_the_cursor_where_it_shows() {
     let cases = [
@@ -1146,6 +1147,8 @@ fn clicking_a_revealed_cell_of_a_wrapping_table_keeps_the_cursor_where_it_shows(
         "- item\n\n  | a | b |\n  |---|---|\n  | 1 | 2 |\n",
         "| 日本 | b |\n|---|---|\n| 1 | 語x |\n",
         "| ab cd | b |\n|---|---|\n| 1 | 2 |\n",
+        "| **a** | b |\n|---|---|\n| 1 | 2 |\n",
+        "| **a** | b |\n|---|---|\n| wide text | 2 |\n",
     ];
     std::thread::scope(|scope| {
         for src in cases {
@@ -1156,7 +1159,7 @@ fn clicking_a_revealed_cell_of_a_wrapping_table_keeps_the_cursor_where_it_shows(
                     .map(|(i, _)| i + 2)
                     .filter(|&at| !src[at..].starts_with(['-', '|', '\n']))
                     .collect();
-                for width in 8..=16 {
+                for width in (8..=16).chain([40]) {
                     for &at in &cells {
                         check_click_and_paint_from(src, width, Some(at)).unwrap_or_else(|e| {
                             panic!("width {width}, cursor at {at}: {e}\nin {src:?}")
