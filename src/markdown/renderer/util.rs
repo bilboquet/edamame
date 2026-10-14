@@ -1,6 +1,7 @@
 //! Shared helpers used across the renderer's block / inline pipelines.
 //! Free functions only — none of these depend on `Renderer`.
 
+use std::borrow::Cow;
 use std::path::Path;
 
 use ratatui::style::Style;
@@ -8,6 +9,56 @@ use ratatui::text::Span;
 
 use crate::config::Theme;
 use crate::markdown::table_layout::{self, char_cells};
+
+/// Padding runs up to this many cells borrow from a static string instead of allocating.  Past
+/// it (a terminal wider than this) they fall back to an owned `String`, as before.
+const STATIC_PAD_CELLS: usize = 512;
+
+const SPACES: &str = {
+    const BYTES: [u8; STATIC_PAD_CELLS] = [b' '; STATIC_PAD_CELLS];
+    match std::str::from_utf8(&BYTES) {
+        Ok(s) => s,
+        Err(_) => panic!("ASCII spaces are UTF-8"),
+    }
+};
+
+const NBSPS: &str = {
+    const BYTES: [u8; STATIC_PAD_CELLS * 2] = {
+        // U+00A0 is `C2 A0` in UTF-8.
+        let mut bytes = [0u8; STATIC_PAD_CELLS * 2];
+        let mut i = 0;
+        while i < STATIC_PAD_CELLS {
+            bytes[2 * i] = 0xC2;
+            bytes[2 * i + 1] = 0xA0;
+            i += 1;
+        }
+        bytes
+    };
+    match std::str::from_utf8(&BYTES) {
+        Ok(s) => s,
+        Err(_) => panic!("NBSP pairs are UTF-8"),
+    }
+};
+
+/// `n` spaces, borrowed from a static string when it is long enough.
+///
+/// Padding is most of the spans a table or code block renders, and a render-cache hit clones
+/// every span of every cached row on each reparse: a borrowed span clones without allocating,
+/// so this takes those spans out of the per-edit allocation count entirely.
+pub(crate) fn spaces(n: usize) -> Cow<'static, str> {
+    match SPACES.get(..n) {
+        Some(s) => Cow::Borrowed(s),
+        None => Cow::Owned(" ".repeat(n)),
+    }
+}
+
+/// `n` no-break spaces (U+00A0), borrowed like [`spaces`].
+pub(super) fn nbsps(n: usize) -> Cow<'static, str> {
+    match NBSPS.get(..2 * n) {
+        Some(s) => Cow::Borrowed(s),
+        None => Cow::Owned("\u{00A0}".repeat(n)),
+    }
+}
 
 /// One character tagged with its source span's style, so the table renderer's
 /// inline-aware wrap keeps styling across a cell's row breaks.
@@ -119,6 +170,19 @@ mod tests {
 
     fn text_of(row: &[StyledChar]) -> String {
         row.iter().map(|c| c.ch).collect()
+    }
+
+    #[test]
+    fn padding_borrows_up_to_the_static_run_and_allocates_past_it() {
+        for n in [0, 1, 7, STATIC_PAD_CELLS] {
+            assert_eq!(spaces(n), " ".repeat(n));
+            assert!(matches!(spaces(n), Cow::Borrowed(_)));
+            assert_eq!(nbsps(n), "\u{00A0}".repeat(n));
+            assert!(matches!(nbsps(n), Cow::Borrowed(_)));
+        }
+        let past = STATIC_PAD_CELLS + 3;
+        assert_eq!(spaces(past), " ".repeat(past));
+        assert_eq!(nbsps(past), "\u{00A0}".repeat(past));
     }
 
     #[test]

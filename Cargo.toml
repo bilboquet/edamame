@@ -267,6 +267,12 @@ seahash = "4"
 # DoS-resistant, which is fine: the keys are local document content.  See #35.
 rustc-hash = "2"
 
+# `HashTable` for the RenderCache's block map: a lookup takes a precomputed hash,
+# so a cache hit hashes its `Block` key once where std's `HashMap` needs a hash
+# for the `remove_entry` and another for the re-`insert`.  Already in the tree
+# (ratatui, indexmap, lru); no default hasher needed, FxHasher supplies it.
+hashbrown = { version = "0.17", default-features = false }
+
 # Line- and word-level diff for the diff-mode review subsystem.
 # `TextDiff::from_lines` gives line hunks; `InlineChange` slices each
 # `Replace` hunk into word-level highlights without us writing a tokenizer.

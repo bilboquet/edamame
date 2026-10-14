@@ -141,6 +141,13 @@ pub struct RowSink {
 }
 
 impl RowSink {
+    pub fn with_capacity(rows: usize) -> Self {
+        Self {
+            lines: Vec::with_capacity(rows),
+            origins: Vec::with_capacity(rows),
+        }
+    }
+
     pub fn push(&mut self, line: Line<'static>, origin: RowOrigin) {
         self.lines.push(line);
         self.origins.push(origin);

@@ -168,8 +168,8 @@ pub fn promote_display_math_paragraphs(
             out_ranges.push(range);
             continue;
         };
-        for (i, formula) in math_sources.iter().enumerate() {
-            let diagram_source = DiagramSource::Latex(formula.clone());
+        for (i, &formula) in math_sources.iter().enumerate() {
+            let diagram_source = DiagramSource::Latex(formula.to_owned());
             let url = crate::diagram::synthetic_url(&diagram_source);
             sources.insert(url.clone(), diagram_source);
             out.push(Block::ImageBlock {
@@ -213,11 +213,10 @@ pub fn split_display_math_paragraphs(
             Some((formulas, piece_ranges)) => {
                 let para_src = block.src().cloned().unwrap_or_default();
                 for (i, formula) in formulas.into_iter().enumerate() {
-                    let src =
-                        piece_src_lines(&para_src, source, &range, &piece_ranges[i], &formula);
+                    let src = piece_src_lines(&para_src, source, &range, &piece_ranges[i], formula);
                     out.push(Block::Paragraph {
                         inlines: vec![Inline::Math {
-                            source: formula,
+                            source: formula.to_owned(),
                             display: true,
                         }],
                         src,
@@ -278,14 +277,17 @@ fn piece_src_lines(
 /// and whitespace-only text between them), return each formula's LaTeX
 /// source in order.  Returns `None` for mixed paragraphs, lone inline
 /// (`$...$`) math, or a paragraph with no display math at all.
-fn collect_display_math_only(inlines: &[Inline]) -> Option<Vec<String>> {
-    let mut formulas: Vec<String> = Vec::new();
+///
+/// Borrows the formulas: it runs on every paragraph of every reparse, one caller only asks
+/// whether the paragraph qualifies, and the others copy each formula exactly once.
+fn collect_display_math_only(inlines: &[Inline]) -> Option<Vec<&str>> {
+    let mut formulas: Vec<&str> = Vec::new();
     for inline in inlines {
         match inline {
             Inline::Math {
                 source,
                 display: true,
-            } => formulas.push(source.clone()),
+            } => formulas.push(source),
             Inline::Math { .. } => return None, // lone inline $...$
             Inline::Text(t) if t.trim().is_empty() => {}
             Inline::SoftBreak | Inline::HardBreak => {}
@@ -493,27 +495,49 @@ pub fn promote_html_comments(blocks: &mut [Block]) {
 ///
 /// Must run AFTER [`promote_html_comments`], which is what creates the `HtmlComment`
 /// blocks this consumes.
-pub fn attach_trailing_tui_columns_comments(blocks: &mut Vec<Block>) {
-    let mut i = 0;
-    while i + 1 < blocks.len() {
-        let is_pair = matches!(
-            (&blocks[i], &blocks[i + 1]),
-            (Block::Table { user_widths: None, .. }, Block::HtmlComment(body, _))
-                if crate::markdown::table_layout::parse_column_widths_comment(body).is_some()
-        );
-        if is_pair {
-            let body = match &blocks[i + 1] {
-                Block::HtmlComment(s, _) => s.clone(),
-                _ => unreachable!(),
-            };
-            let widths = crate::markdown::table_layout::parse_column_widths_comment(&body).unwrap();
-            if let Block::Table { user_widths, .. } = &mut blocks[i] {
-                *user_widths = Some(widths);
+///
+/// `ranges`, when given, is the blocks' 1:1 top-level byte ranges, rewritten to stay 1:1: the
+/// table's range takes in the comment's, so the covering-ranges pass has no gap to fill.
+///
+/// One pass that rebuilds both vectors, not a `Vec::remove` per comment: each removal shifts
+/// every block after it, so a document whose every table carries a widths comment (which
+/// resizing a column writes) cost tables × blocks moves per reparse.
+pub fn attach_trailing_tui_columns_comments(
+    blocks: &mut Vec<Block>,
+    mut ranges: Option<&mut Vec<Range<usize>>>,
+) {
+    let old_blocks = std::mem::take(blocks);
+    let old_ranges = ranges.as_deref_mut().map(std::mem::take);
+    debug_assert!(old_ranges
+        .as_ref()
+        .is_none_or(|r| r.len() == old_blocks.len()));
+    let mut old_ranges = old_ranges.map(Vec::into_iter);
+    for block in old_blocks {
+        let range = old_ranges.as_mut().and_then(Iterator::next);
+        // A table takes one comment, the one directly after it: once its widths are set, a
+        // second comment no longer matches and stays a block of its own.
+        if let (
+            Some(Block::Table {
+                user_widths: slot @ None,
+                ..
+            }),
+            Block::HtmlComment(body, _),
+        ) = (blocks.last_mut(), &block)
+        {
+            if let Some(widths) = crate::markdown::table_layout::parse_column_widths_comment(body) {
+                *slot = Some(widths);
+                if let (Some(table), Some(comment)) =
+                    (ranges.as_deref_mut().and_then(|r| r.last_mut()), range)
+                {
+                    table.end = comment.end;
+                }
+                continue;
             }
-            blocks.remove(i + 1);
-            continue;
         }
-        i += 1;
+        blocks.push(block);
+        if let (Some(out), Some(range)) = (ranges.as_deref_mut(), range) {
+            out.push(range);
+        }
     }
 }
 
