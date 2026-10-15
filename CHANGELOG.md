@@ -8,6 +8,8 @@ Each released version's section is also what ships as the GitHub release notes: 
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-10-14
+
 ### Changed
 
 - Paragraphs inside list items, blockquotes and footnotes now reflow to the window width like top-level paragraphs. With reflow off, every paragraph keeps your line breaks.
@@ -147,7 +149,8 @@ Each released version's section is also what ships as the GitHub release notes: 
 
 First public release.
 
-[Unreleased]: https://github.com/mijowi/edamame/compare/v0.1.5...HEAD
+[Unreleased]: https://github.com/mijowi/edamame/compare/v0.1.6...HEAD
+[0.1.6]: https://github.com/mijowi/edamame/compare/v0.1.5...v0.1.6
 [0.1.5]: https://github.com/mijowi/edamame/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/mijowi/edamame/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/mijowi/edamame/compare/v0.1.2...v0.1.3
