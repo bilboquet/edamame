@@ -10,7 +10,7 @@
 
 ### Releasing
 
-On `main`:
+On `main`, after merging all changes from `develop`:
 
 ```bash
 VERSION=0.1.0    # the new version, used by the commands below
@@ -35,7 +35,7 @@ PREV=0.0.9       # the previous release: the benchmark baseline to compare again
    cargo bench --bench pipeline -- --noplot "$F" --load-baseline "v$VERSION" --baseline "v$PREV"
    ```
 
-   Treat a "regressed" line as something to confirm, not a release blocker by itself. With no `v$PREV` baseline on this machine, run only the first command; this release's baseline starts the chain.
+   Treat a "regressed" line as something to confirm, not a release blocker by itself. With no `v$PREV` baseline on this machine (a new machine, or after `cargo clean`), rebuild it from the `v$PREV` tag first ([Rebuilding a missing baseline](performance.md#rebuilding-a-missing-baseline)).
 
 5. `dist plan` — confirm it announces `v$VERSION` and the five targets.
 6. Commit all three files together:
