@@ -139,65 +139,67 @@ What these numbers show:
 
 ### Intel Core Ultra 7 258V (Linux)
 
-Measured 2026-10-07 on Debian 13 (Linux 7.1.8), `rustc 1.99.0 (b940084d7 2026-09-28)`, criterion 0.8.2, mimalloc 0.1.52, on AC power with the `power-saver` profile, with row provenance in (see [below](#cost-of-row-provenance)). The end-to-end figures are the median of three runs' criterion means, in ms; the three runs agreed within 2.7% on the median case and 10% at worst. The stage figures (`parse_merged`, `render_only`) come from one run, since the release subset doesn't include them.
+Measured 2026-10-14 at `develop` ab7ad1d (the v0.1.6 release candidate) on Debian 13 (Linux 7.1.8), `rustc 1.99.0 (b940084d7 2026-09-28)`, criterion 0.8.2, mimalloc 0.1.52, on AC power with the `power-saver` profile, with row provenance in (see [below](#cost-of-row-provenance)). The end-to-end figures are the median of three runs' criterion means, in ms. The three runs agreed within 1.8% on the median case and 11.5% at worst (`full_pipeline_memoized/mixed/5000`). The stage figures (`parse_merged`, `render_only`) come from one run, since the release subset doesn't include them.
 
 **Steady-state edit** (`full_pipeline_memoized`):
 
 | Corpus | 1k | 5k | 20k |
 |---|---|---|---|
-| `prose` | 1.98 | 10.7 | 46.5 |
-| `lists` | 1.65 | 9.12 | 41.7 |
-| `tables` | 2.54 | 13.6 | 56.8 |
-| `code` | 0.647 | 2.15 | 10.9 |
-| `math` | 1.32 | 7.52 | 32.1 |
-| `nested` | 1.02 | 5.64 | 30.3 |
-| `mixed` | 1.46 | 7.95 | 35.3 |
+| `prose` | 2.00 | 10.9 | 45.5 |
+| `lists` | 1.67 | 9.14 | 39.1 |
+| `tables` | 2.53 | 13.0 | 53.5 |
+| `code` | 0.597 | 1.89 | 8.07 |
+| `math` | 1.33 | 7.33 | 29.9 |
+| `nested` | 1.00 | 5.41 | 26.0 |
+| `mixed` | 1.47 | 7.78 | 33.8 |
 
-Every corpus stays inside the 16 ms budget at 5k; `tables`, `prose` and `lists` are in the marginal band there, and `mixed` is just under it. At 20k only `code` stays inside it (marginal), and every other corpus exceeds it.
+Every corpus stays inside the 16 ms budget at 5k; `tables`, `prose` and `lists` are in the marginal band there, and `mixed` is just under it. At 20k only `code` stays inside it (marginal, barely), and every other corpus exceeds it.
 
 **Cold open** (`full_pipeline`):
 
 | Corpus | 1k | 5k | 20k |
 |---|---|---|---|
-| `prose` | 1.99 | 10.8 | 46.2 |
-| `lists` | 1.66 | 9.11 | 39.6 |
-| `tables` | 5.49 | 29.0 | 129 |
-| `code` | 9.75 | 47.3 | 197 |
-| `math` | 1.33 | 7.39 | 32.5 |
-| `nested` | 16.3 | 82.4 | 343 |
-| `mixed` | 2.50 | 13.4 | 60.2 |
+| `prose` | 2.01 | 10.9 | 45.6 |
+| `lists` | 1.65 | 9.12 | 38.6 |
+| `tables` | 5.16 | 28.0 | 118 |
+| `code` | 9.64 | 47.2 | 201 |
+| `math` | 1.36 | 7.64 | 31.6 |
+| `nested` | 15.7 | 83.0 | 337 |
+| `mixed` | 2.44 | 13.0 | 55.1 |
 
 **Stage breakdown at 20k:**
 
 | Corpus | full | `parse_merged` | `render_only` | other | Dominant |
 |---|---|---|---|---|---|
-| `prose` | 46.2 | 35.5 | 9.53 | 1.13 | parse (76.9%) |
-| `lists` | 39.6 | 25.6 | 12.0 | 1.97 | parse (64.7%) |
-| `tables` | 129 | 39.1 | 84.5 | 5.07 | render (65.7%) |
-| `code` | 197 | 1.96 | 192 | 2.43 | render (97.8%) |
-| `math` | 32.5 | 9.68 | 2.88 | 19.9 | other (61.3%) |
-| `nested` | 343 | 14.6 | 323 | 5.82 | render (94.1%) |
-| `mixed` | 60.2 | 21.7 | 31.4 | 7.07 | render (52.2%) |
+| `prose` | 45.6 | 33.4 | 8.91 | 3.26 | parse (73.3%) |
+| `lists` | 38.6 | 25.7 | 9.56 | 3.36 | parse (66.6%) |
+| `tables` | 118 | 40.9 | 71.9 | 4.86 | render (61.1%) |
+| `code` | 201 | 1.95 | 191 | 7.72 | render (95.2%) |
+| `math` | 31.6 | 9.56 | 3.09 | 18.9 | other (59.9%) |
+| `nested` | 337 | 14.5 | 318 | 4.65 | render (94.3%) |
+| `mixed` | 55.1 | 21.8 | 28.6 | 4.70 | render (51.9%) |
 
-`mixed` across 1k / 5k / 20k: full 2.50 / 13.4 / 60.2, `parse_merged` 0.981 / 5.31 / 21.7, `render_only` 1.34 / 7.09 / 31.4.
+`mixed` across 1k / 5k / 20k: full 2.44 / 13.0 / 55.1, `parse_merged` 0.991 / 5.25 / 21.8, `render_only` 1.27 / 6.68 / 28.6.
 
 **Memoization** (change from `full_pipeline` to `full_pipeline_memoized` at 20k):
 
 | Corpus | Change |
 |---|---|
-| `prose` | +0.6% |
-| `lists` | +5.2% |
-| `tables` | −55.9% |
-| `code` | −94.4% |
-| `math` | −1.1% |
-| `nested` | −91.2% |
-| `mixed` | −41.4% |
+| `prose` | −0.1% |
+| `lists` | +1.3% |
+| `tables` | −54.6% |
+| `code` | −96.0% |
+| `math` | −5.3% |
+| `nested` | −92.3% |
+| `mixed` | −38.6% |
 
 **Resize** (`visual_cache_build`, `mixed`):
 
 | 1k | 5k | 20k |
 |---|---|---|
-| 3.62 | 16.6 | 52.5 |
+| 3.72 | 16.7 | 53.1 |
+
+**Against v0.1.5.** The release check (see [Checking a release for regressions](#checking-a-release-for-regressions)) compared this tree with a `v0.1.5` baseline rebuilt on the same machine and toolchain. Parse-bound cases are 8–21% slower: steady-state edits of `prose`, `lists`, `tables`, `math` and `mixed` by 6–19%, cold opens of `prose`, `lists` and `math` by 8–21%. Back-to-back runs of the two bench binaries reproduced the 5k gaps (+11–22%). This is row provenance's accepted cost, a few points above its instruction deltas, as below. Render-bound cold opens (`tables`, `code`, `nested`) moved within ±5%, and `visual_cache_build`, which neither change touches, within 1.1%. The only budget change is `lists` at 5k, which moves from fine into the marginal band, on edit (8.03 → 9.14 ms) and on open (7.64 → 9.12 ms).
 
 #### Cost of row provenance
 
@@ -232,8 +234,9 @@ Both sections are measured with mimalloc, so the ratios below are a hardware com
 ## The two optimizations, and why they must not be undone
 
 - **One parse, not two.** `parse_raw_with_ranges` collects top-level byte ranges from a `parse_offsets::RangeTracker` observing the same offset-iterator events the AST builder consumes, so blocks and ranges stay 1:1 *by construction*. Splitting them back into two passes costs a full extra parse per reparse.
-- **Block-level render memoization.** `RenderCache` maps an unchanged block to a clone of its lines instead of a re-render; this is what makes table- and code-heavy documents editable at all. Its correctness rules (AST-value keying, the `RenderSettings` fingerprint, `ImageBlock` exclusion) are in [editing-model.md](editing-model.md). Two cost properties:
+- **Block-level render memoization.** `RenderCache` maps an unchanged block to a clone of its lines instead of a re-render; this is what makes table- and code-heavy documents editable at all. Its correctness rules (AST-value keying, the `RenderSettings` fingerprint, `ImageBlock` exclusion) are in [editing-model.md](editing-model.md). Three cost properties:
   - **Keys hash with `FxHasher` (`rustc-hash`), not SipHash.** The keys are local document content, so DoS resistance buys nothing, and SipHash is slow on the many small `write_*` calls a nested `Block` makes. (seahash benches *slower* than SipHash here — it is tuned for whole byte buffers.)
+  - **Each block is hashed once per build.** `render_cache::BlockMap` wraps a `hashbrown::HashTable`, not a `HashMap`: the render loop computes `BlockMap::hash` once and passes it to the lookup in this build's map, the `take` from the previous build's, and the insert. A `HashMap` hit hashed the deep `Block` key twice (`remove_entry`, then `insert`). No test can pin this; only the memoized benches would show it being undone.
   - **Only cache-worthy blocks are stored** (`render_cache::is_cache_worthy`): a `Table`/`CodeBlock`, or a `List`/`BlockQuote` containing one. Cheap blocks re-render for less than a lookup costs. The gate is a subtree walk, not a match on the outer kind, so an expensive block inside a cheap container stays cached.
 
 Both are asserted: `merged_parse_matches_two_pass_parse` (`src/markdown/parser.rs`) pins the merged parse to the two-pass pairing; `cached_render_matches_uncached` plus the eviction, settings-invalidation, syntax-toggle and image-bypass tests (`src/markdown/renderer.rs`) pin cached output to uncached; `cheap_blocks_bypass_cache` and `is_cache_worthy_follows_nested_expensive_content` pin the gate.
@@ -244,7 +247,7 @@ Facts about the current design, not tasks.
 
 - **The full-document parse floor.** The single parse is O(document) and cannot be memoized (4.53 ms for `parse_merged/mixed/20000` on the Apple M3) — and dominates prose and lists. Only incremental reparsing removes it, which must handle the non-local effects of fences, setext headings, lists and footnote definitions; a separate project.
 - **Clone-on-hit.** A hit still clones the block's `Vec<Line>`; on cached (expensive) blocks that is a small share of the render. The allocator decides what that costs: under glibc's it was half of a 20k memoized build on Linux, and mimalloc (see `Cargo.toml`) brought it back to a small share. Removing it means sharing lines as `Arc<[Line]>`, which changes `ParsedDoc::lines`' type and ripples through every view — worth it only if very large table-/code-heavy documents matter.
-- **Resize re-renders the whole document cold.** A width change reaches `EditorState::set_viewport_width`, which calls `refresh_parsed`. The width is part of the `RenderSettings` fingerprint, so the render cache is cleared and every block re-renders: a `full_pipeline` (cold-open) cost, plus the `visual_cache_build` prefix-sum rebuild. For a 20k-line `nested` document that is about 119 + 19 ms on the Apple M3 and 333 + 54 ms on Linux. The `visual_cache_build` part alone exceeds a frame from roughly 17k lines. Both run once per quiesced drag, behind the 80 ms `RESIZE_QUIESCE` window (`app::frame_timer`). The same full re-render follows anything else in the fingerprint: a theme change, a grammar finishing its warm-up (`App::tick_syntax_warm` bumps the highlight generation), and a switch into or out of Raw mode (reflow). In code-heavy documents nearly all of that cost is syntax highlighting, which depends only on each block's language and source. Leave it unless resize or theme-switch lag shows up.
+- **Resize re-renders the whole document cold.** A width change reaches `EditorState::set_viewport_width`, which calls `refresh_parsed`. The width is part of the `RenderSettings` fingerprint, so the render cache is cleared and every block re-renders: a `full_pipeline` (cold-open) cost, plus the `visual_cache_build` prefix-sum rebuild. For a 20k-line `nested` document that is about 119 + 19 ms on the Apple M3 and 337 + 53 ms on Linux. The `visual_cache_build` part alone exceeds a frame from roughly 17k lines. Both run once per quiesced drag, behind the 80 ms `RESIZE_QUIESCE` window (`app::frame_timer`). The same full re-render follows anything else in the fingerprint: a theme change, a grammar finishing its warm-up (`App::tick_syntax_warm` bumps the highlight generation), and a switch into or out of Raw mode (reflow). In code-heavy documents nearly all of that cost is syntax highlighting, which depends only on each block's language and source. Leave it unless resize or theme-switch lag shows up.
 - **Recording source positions is a per-parse cost** (`parser::stream::EventStream`; see [editing-model.md](editing-model.md)). It is kept small three ways. A paragraph's recorder looks only at the events that can begin a line. `SrcLines` stores a uniform column with at most two chrome lines inline, and any other shape as one boxed slice, so a common leaf allocates nothing and hashes in a few words as a cache key. Line lookups step forward from the last one, since events arrive in source order. The remaining cost is the recording itself, plus `Block` growing from 80 to 112 bytes: 8–17% of every parse, and 23% of rendering a list (see [Cost of row provenance](#cost-of-row-provenance)).
 - **`parse_offsets::top_level_block_ranges` is off the edit path** — it survives only as the oracle in `merged_parse_matches_two_pass_parse` (the diff subsystem uses the sibling `block_ranges_by`).
 
