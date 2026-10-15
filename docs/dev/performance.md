@@ -261,11 +261,31 @@ cargo bench --bench pipeline -- --noplot "$F" --save-baseline v0.1.5
 cargo bench --bench pipeline -- --noplot "$F" --load-baseline v0.1.5 --baseline v0.1.4
 ```
 
-- **The baseline lives in `target/criterion/`** on the machine that produced it, so one machine has to carry the check from release to release, and `cargo clean` deletes it. With no baseline from the previous release (the first check, a new machine, a `cargo clean`), the simplest course is to skip that release's comparison and only save. When the comparison matters, rebuild the baseline from the previous tag with `git worktree add ../edamame-prev v0.1.4`, then `cargo bench … --save-baseline v0.1.4` from inside it. Point `CARGO_TARGET_DIR` at the main checkout's `target/` so the baseline lands where the current tree's run will look, and expect a full rebuild, since the old tag's dependencies differ.
-- **Re-save the previous release's baseline after a toolchain or OS upgrade**, and keep the machine in the same power state both times (plugged in, same power profile). Either one shifts every number and reads as a regression or an improvement across the board.
+- **The baseline lives in `target/criterion/`** on the machine that produced it, and `cargo clean` deletes it. It is a cache, not a record: if it is missing, rebuild it from the previous tag ([below](#rebuilding-a-missing-baseline)).
+- **Re-save the previous release's baseline after a toolchain or OS upgrade**, the same way, and keep the machine in the same power state both times (plugged in, same power profile). Either one shifts every number and reads as a regression or an improvement across the board.
 - **A "regressed" line is a lead, not a verdict.** On a laptop, unchanged code can move ±5–8% between runs. Confirm a suspect by running the two builds' bench binaries (`target/release/deps/pipeline-*`) back to back, a few rounds each, filtered to the suspect case. Drift affects both builds alike that way.
 - **`--noplot` skips criterion's HTML charts**, about a fifth of the run time. Drop it when you want the charts to look into a regression.
 - **The stage groups** (`parse_merged`, `render_only`) **are diagnostics.** Run them when an end-to-end case regresses, to find the stage that moved.
+
+### Rebuilding a missing baseline
+
+A missing previous-release baseline means a new machine, a first check, or a `cargo clean`. `ls target/criterion/full_pipeline/prose/1000/` lists the saved baselines by name. Only the previous release's baseline is needed, never the whole chain. Bench its tag from a worktree, writing into this checkout's `target/` so the baseline lands where the current tree's comparison looks:
+
+```bash
+PREV=0.1.5
+F='^(full_pipeline|visual_cache)'
+git diff --quiet "v$PREV" -- benches/ || echo "bench harness changed since v$PREV"
+T="$PWD/target"
+git worktree add ../edamame-prev "v$PREV"
+(cd ../edamame-prev && CARGO_TARGET_DIR="$T" cargo bench --bench pipeline -- --noplot "$F" --save-baseline "v$PREV")
+git worktree remove ../edamame-prev
+```
+
+Then run the release check as usual. Expect a full release build of the old tag (its dependencies differ) plus one bench run, about 20 minutes on the Linux laptop above.
+
+- **A rebuilt baseline is as good as the original, often better.** It is measured with today's toolchain and in today's machine state, so the comparison isolates the code change. That is the same reason to re-save after a toolchain upgrade.
+- **If the harness changed since the tag** (the `git diff` line prints), the two runs time different corpora or settings, and their numbers are not comparable. Skip the comparison and save this release's baseline only.
+- **The old tag must still build with the current toolchain.** Its `Cargo.lock` pins its dependencies. A new compiler error in old code is rare, but if one appears, skip the comparison the same way.
 
 ## When to re-measure
 
