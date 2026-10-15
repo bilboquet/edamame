@@ -29,6 +29,11 @@ Each released version's section is also what ships as the GitHub release notes: 
 - Dragging to select no longer switches lines between rendered and Markdown source mid-drag.
 - `==highlighted==` text containing an apostrophe, quotation marks, a dash or `...` now shows as highlighted.
 
+### Security
+
+- HTML export's sanitizer no longer lets crafted SVG animation tags or CSS `url()` values in a document's raw HTML through into the exported file, where they could run script when the file is opened in a browser.
+- Fixed a TLS flaw in the connection used for remote images and the update check.
+
 ## [0.1.5] - 2026-10-05
 
 ### Added
